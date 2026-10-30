@@ -20,10 +20,8 @@ spec:
             - {name: TEMPORAL_ADDRESS, value: "__TEMPORAL_ADDRESS__"}
             - {name: TEMPORAL_NAMESPACE, value: "default"}
             - {name: OPENAI_AGENTS_DISABLE_TRACING, value: "1"}
-            # OpenAI-compatible provider. Real xAI: OPENAI_BASE_URL=https://api.x.ai/v1, OPENAI_MODEL=<grok model>
-            - {name: LLM_BACKEND, value: "openai"}
-            # host-side llm_gateway (scripts/start-gateway.sh) via the kind docker bridge gateway.
-            # In-cluster mock instead: http://mock-llm.agent-demo.svc:8000/v1 + grok-mock
+            # OpenAI-compatible chat-completions endpoint: the host-side llm_gateway
+            # (scripts/start-gateway.sh) via the kind docker bridge. The model name comes per session.
             - {name: OPENAI_BASE_URL, value: "__OPENAI_BASE_URL__"}
             - name: OPENAI_API_KEY
               valueFrom: {secretKeyRef: {name: llm-api-key, key: api-key}}

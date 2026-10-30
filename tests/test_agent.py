@@ -12,11 +12,10 @@ from temporalio.client import Client, WorkflowFailureError
 from temporal_agent_harness.harness.agent_client import AgentClient
 from temporal_agent_harness.harness.agent_protocol import AgentConfig
 
-from temporal_agent_demo import TASK_QUEUE
-from temporal_agent_demo.agent import AGENT_NAME, TaskResult, WorkspaceSession
 from temporal_agent_demo.api import create_app
 from temporal_agent_demo.config import plugins
-from temporal_agent_demo.models import new_execution_id
+from temporal_agent_demo.shared import AGENT_NAME, TASK_QUEUE, TaskResult, WorkspaceSession, new_execution_id
+from temporal_agent_demo.starter import start_execution, wait_result
 from temporal_agent_demo.worker import build_worker
 
 from .conftest import MOCK_KEY
@@ -201,3 +200,14 @@ async def test_api_post_executions_native(env, ws_root, mock):
             assert g["result"]["outcome"] == "completed" and g["result"]["final"].startswith("DONE")
             assert (await tc.get("/executions/exec-nothex")).status_code == 400
             assert (await tc.post("/executions/../close")).status_code in (400, 404)
+
+
+async def test_starter_start_execution(env, ws_root, mock):
+    _, url = mock
+    c = await model_client(env, url)
+    async with build_worker(c, identity="w-starter"):
+        started = await start_execution(c, "via starter", model="grok-mock")
+        assert started["execution_id"] == started["workflow_id"] == started["workspace_id"] != started["run_id"]
+        res = await asyncio.wait_for(wait_result(c, started["execution_id"]), 60)
+    assert res.outcome == "completed" and res.session_status == "closed"
+    assert (Path(ws_root) / started["execution_id"] / "output/result.md").exists()

@@ -70,7 +70,11 @@ def create_app() -> FastAPI:
     if not keys:
         raise SystemExit("GATEWAY_API_KEYS must be set (local bearer key(s) for workers)")
     default_model = os.environ.get("GATEWAY_DEFAULT_MODEL", "grok-4.6")
-    mock_app = create_mock_app(MockSettings(api_keys=set(), model=MOCK_MODEL))
+    # grok-mock route: the scripted mock in-process; MOCK_LATENCY_S / MOCK_FAULT_* env vars
+    # turn on latency / 429-500 fault injection for e2e runs (see mock_llm_server/app.py).
+    mock_settings = MockSettings.from_env()
+    mock_settings.api_keys, mock_settings.model = set(), MOCK_MODEL
+    mock_app = create_mock_app(mock_settings)
     mock = httpx.AsyncClient(transport=httpx.ASGITransport(app=mock_app), base_url="http://mock/v1")
     upstream = XaiOAuthUpstream() if mode == "xai-oauth" else None
 

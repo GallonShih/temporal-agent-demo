@@ -3,7 +3,7 @@
 Plugin stack (order matters, harness LAST, as in the harness examples):
   1. OpenAIAgentsPlugin   model activities (invoke_model_activity) + OpenAI-aware payload converter.
                           Its model provider is an OpenAI *chat-completions* client pointed at
-                          OPENAI_BASE_URL (host llm_gateway / mock-llm) with SDK retries disabled,
+                          OPENAI_BASE_URL (host llm_gateway; tests: mock_llm_server), SDK retries off,
                           so Temporal activity retries own 429/5xx.
   2. AgentHarnessPlugin   harness activities, WorkspaceDisk vfs.* activities, large-payload offload.
 """

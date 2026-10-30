@@ -1,9 +1,10 @@
 """Agent worker: every replica runs this identical process on task queue `agent`.
 
-Registers the native harness agent (WorkspaceAgent). Model activities come from the
-OpenAIAgentsPlugin and WorkspaceDisk vfs.* / harness activities from AgentHarnessPlugin, both
-on the client (see config.py). AGENT_ENABLE_LEGACY=1 also registers the old hand-written
-AgentWorkflow + llm_call (temporal_agent_demo.legacy).
+    python -m temporal_agent_demo.worker
+
+Registers the WorkspaceAgent workflow. Its activities come from the client plugins (config.py):
+``invoke_model_activity`` (OpenAIAgentsPlugin) and the harness + WorkspaceDisk ``vfs.*`` activities
+(AgentHarnessPlugin).
 """
 
 from __future__ import annotations
@@ -17,33 +18,20 @@ import socket
 from temporalio.client import Client
 from temporalio.worker import Worker
 
-from . import TASK_QUEUE
-from .agent import WorkspaceAgent
 from .config import connect
+from .shared import TASK_QUEUE
+from .workflows import WorkspaceAgent
 
 
 def worker_name() -> str:
     return os.environ.get("POD_NAME") or socket.gethostname()
 
 
-def legacy_enabled() -> bool:
-    return os.environ.get("AGENT_ENABLE_LEGACY", "0") == "1"
-
-
-def build_worker(client: Client, identity: str | None = None, legacy: bool | None = None, **kw) -> Worker:
-    workflows: list = [WorkspaceAgent]
-    activities: list = []
-    if legacy if legacy is not None else legacy_enabled():
-        from .legacy.llm import llm_call
-        from .legacy.workflow import AgentWorkflow
-
-        workflows.append(AgentWorkflow)
-        activities.append(llm_call)
+def build_worker(client: Client, identity: str | None = None, **kw) -> Worker:
     return Worker(
         client,
         task_queue=TASK_QUEUE,
-        workflows=workflows,
-        activities=activities,
+        workflows=[WorkspaceAgent],
         identity=identity or f"{worker_name()}@agent-worker",
         **kw,
     )
@@ -51,7 +39,7 @@ def build_worker(client: Client, identity: str | None = None, legacy: bool | Non
 
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    logging.getLogger("httpx").setLevel(logging.WARNING)  # no request lines (headers never logged anyway)
+    logging.getLogger("httpx").setLevel(logging.WARNING)  # no request lines
     logging.getLogger("openai").setLevel(logging.WARNING)
     client = await connect()
     worker = build_worker(client)
@@ -59,8 +47,7 @@ async def main() -> None:
     loop = asyncio.get_running_loop()
     for s in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(s, stop.set)
-    logging.info("worker %s polling task queue %r (workflows: %s)", worker.config()["identity"], TASK_QUEUE,
-                 [getattr(w, "__temporal_workflow_definition").name for w in worker.config()["workflows"]])
+    logging.info("worker %s polling task queue %r", worker.config()["identity"], TASK_QUEUE)
     async with worker:
         await stop.wait()
     logging.info("worker stopped")

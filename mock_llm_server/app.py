@@ -6,9 +6,10 @@ Endpoints
   GET  /v1/stats                 -> counters (requests, faults, per-status)
   GET  /healthz
 
-Behaviour is deterministic in the request messages: it counts prior assistant turns and returns
-the next step of a scripted plan (tool_calls ... then a final assistant message). Same script as the
-in-process MockLLM, but expressed purely over the OpenAI wire format.
+Behaviour is deterministic in the request messages: it returns the next unanswered step of a
+scripted plan for the WorkspaceAgent tools (run_code, list_files, write_file, read_file on
+/workspace paths; tool_calls ... then a final "DONE <session_id> digest=..." message).
+"[probe-traversal][probe-target=<exec id>]" in the task adds a step of path-escape attempts.
 
 Env
   MOCK_API_KEYS        comma-separated accepted bearer keys (required header; empty list = any non-empty key)
@@ -82,7 +83,7 @@ def _tool_call(cid: str, name: str, args: dict) -> dict:
     return {"id": cid, "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}
 
 
-def _native_plan(task: str, sid: str, digest: str, tool_msgs: list[dict]) -> list[list[dict] | str]:
+def _plan(task: str, sid: str, digest: str, tool_msgs: list[dict]) -> list[list[dict] | str]:
     """Plan for the native harness agent (WorkspaceAgent): virtual /workspace paths, Code Mode."""
     errors = sum(1 for m in tool_msgs if "failed:" in str(m.get("content", ""))[:80]
                  or "Error" in str(m.get("content", ""))[:60])
@@ -123,49 +124,19 @@ def scripted_reply(messages: list[dict], tools_available: set[str]) -> dict:
     task = next((_text(m.get("content")) for m in messages if m.get("role") == "user"), "")
     session = re.search(r"session_id=(\S+)", next((_text(m.get("content")) for m in messages if m.get("role") == "system"), ""))
     sid = session.group(1) if session else "unknown"
-    turn = sum(1 for m in messages if m.get("role") == "assistant")
     tool_msgs = [m for m in messages if m.get("role") == "tool"]
-    errors = sum(1 for m in tool_msgs if str(m.get("content", "")).startswith(("PermissionError", "ERROR")))
     digest = hashlib.sha256(task.encode()).hexdigest()[:12]
-
-    if "run_code" in tools_available:
-        plan = _native_plan(task, sid, digest, tool_msgs)
-        # Position = first step whose calls are not all answered yet (robust to clients that
-        # split one multi-call assistant message into several, as the Agents SDK may).
-        answered = {m.get("tool_call_id") for m in tool_msgs}
-        step = next((st for st in plan if isinstance(st, str) or not {c["id"] for c in st} <= answered), plan[-1])
-        if isinstance(step, str):
-            return {"role": "assistant", "content": step}
-        return {"role": "assistant", "content": None, "tool_calls": step}
-
-    plan: list[list[dict] | str] = [
-        [_tool_call("c1", "write_file", {"path": "input/task.md", "content": task}),
-         _tool_call("c2", "list_files", {"path": "."})],
-        [_tool_call("c3", "write_file", {"path": "output/plan.md",
-                                         "content": f"# plan for {sid}\n1. read task\n2. analyse\n3. write result\n(task digest {digest})\n"}),
-         _tool_call("c4", "read_file", {"path": "input/task.md"})],
-    ]
-    if "[probe-traversal]" in task:
-        m = re.search(r"\[probe-target=(exec-[0-9a-f]{32})\]", task)
-        other = m.group(1) if m else "exec-" + "0" * 32
-        plan.append([
-            _tool_call("p1", "read_file", {"path": f"../{other}/input/task.md"}),
-            _tool_call("p2", "read_file", {"path": "/etc/passwd"}),
-            _tool_call("p3", "write_file", {"path": f"../{other}/output/pwned.md", "content": "x"}),
-            _tool_call("p4", "list_files", {"path": "../.."}),
-        ])
-    plan.append([
-        _tool_call("c5", "write_file", {"path": "output/result.md",
-                                        "content": f"# result for {sid}\ntask digest: {digest}\n"
-                                                   f"tool results so far: {len(tool_msgs)} (errors: {errors})\n"}),
-        _tool_call("c6", "list_files", {"path": "output"}),
-    ])
-    plan.append(f"DONE {sid} digest={digest}")
-    step = plan[min(turn, len(plan) - 1)]
-    if isinstance(step, str) or not tools_available:
-        return {"role": "assistant", "content": step if isinstance(step, str) else f"DONE {sid} (no tools offered)"}
-    step = [c for c in step if c["function"]["name"] in tools_available]
-    return {"role": "assistant", "content": None, "tool_calls": step}
+    if not tools_available:
+        return {"role": "assistant", "content": f"DONE {sid} (no tools offered)"}
+    plan = _plan(task, sid, digest, tool_msgs)
+    # Position = first step whose calls are not all answered yet (robust to clients that split
+    # one multi-call assistant message into several, as the Agents SDK may).
+    answered = {m.get("tool_call_id") for m in tool_msgs}
+    step = next((st for st in plan if isinstance(st, str) or not {c["id"] for c in st} <= answered), plan[-1])
+    if isinstance(step, str):
+        return {"role": "assistant", "content": step}
+    return {"role": "assistant", "content": None,
+            "tool_calls": [c for c in step if c["function"]["name"] in tools_available]}
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:

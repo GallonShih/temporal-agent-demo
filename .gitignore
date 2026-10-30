@@ -8,3 +8,6 @@ wheels/
 
 # Virtual environments
 .venv
+
+# e2e reports (generated)
+e2e-out/

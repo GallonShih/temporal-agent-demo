@@ -19,6 +19,7 @@ spec:
           env:
             - {name: TEMPORAL_ADDRESS, value: "__TEMPORAL_ADDRESS__"}
             - {name: TEMPORAL_NAMESPACE, value: "default"}
+            - {name: OPENAI_MODEL, value: "__OPENAI_MODEL__"}   # default model for new sessions
           ports: [{containerPort: 8000}]
           readinessProbe:
             httpGet: {path: /healthz, port: 8000}

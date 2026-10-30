@@ -1,11 +1,21 @@
-"""End-to-end demo against the kind cluster.
+"""End-to-end check of the WorkspaceAgent deployment on the kind cluster.
 
 Needs (see deploy.sh):  kubectl port-forward -n agent-demo svc/agent-api 18000:8000
                         kubectl port-forward -n <temporal-ns> svc/<frontend> 17233:7233
+and the host llm_gateway running; model `grok-mock` is always the scripted mock. Start it with mock latency
+so the SIGKILL lands mid-activity (faults optional):  MOCK_LATENCY_S=2 MOCK_FAULT_EVERY=4 scripts/start-gateway.sh
+
+    uv run python scripts/e2e.py                 # mock suite: 10 runs, traversal probe, SIGKILL a worker
+    uv run python scripts/e2e.py --real 3        # + 3 short real tasks on grok-4.6 (spends quota)
+    uv run python scripts/e2e.py --skip-mock --real 1
+
+Env: E2E_API (default http://localhost:18000), E2E_TEMPORAL (default localhost:17233).
+Writes e2e-out/report.json.
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import os
@@ -13,17 +23,25 @@ import subprocess
 import sys
 import time
 from collections import Counter
+from pathlib import Path
 
 import httpx
 from temporalio.api.enums.v1 import EventType
 from temporalio.client import Client
 
 from temporal_agent_demo.config import harness_plugin
-from temporal_agent_demo.models import AgentResult
+from temporal_agent_demo.shared import TaskResult
 
-API = "http://localhost:18000"
-TEMPORAL = "localhost:17233"
+API = os.environ.get("E2E_API", "http://localhost:18000")
+TEMPORAL = os.environ.get("E2E_TEMPORAL", "localhost:17233")
 NS = "agent-demo"
+MODEL_ACTIVITY = "invoke_model_activity"
+EXPECTED = {"./session.json", "./input/task.md", "./output/plan.md", "./output/result.md", "./temp/steps.json"}
+REAL_TASKS = [
+    "Write a three-line haiku about Temporal workflows to /workspace/output/haiku.md, then read it back.",
+    "List the files in /workspace, then write a one-paragraph summary of what you found to /workspace/output/summary.md.",
+    "Write the first 10 Fibonacci numbers, comma separated, to /workspace/output/fib.txt.",
+]
 
 
 def sh(*args: str) -> str:
@@ -40,160 +58,137 @@ def in_pod(pod: str, cmd: str) -> str:
     return sh("kubectl", "exec", "-n", NS, pod, "--", "sh", "-c", cmd)
 
 
-async def history_by_activity(client: Client, wid: str) -> list[tuple[str, str]]:
-    """[(activity_type, identity_that_started_it)] in schedule order."""
+def post(http: httpx.Client, task: str, model: str) -> dict:
+    r = http.post(f"{API}/executions", json={"task": task, "model": model})
+    r.raise_for_status()
+    return r.json()
+
+
+async def result(client: Client, wid: str, timeout: float = 300) -> TaskResult:
+    h = client.get_workflow_handle(wid)
+    await asyncio.wait_for(h.result(), timeout)
+    return await h.query("result", result_type=TaskResult)
+
+
+async def activity_starts(client: Client, wid: str) -> list[dict]:
+    """Every activity start in schedule order: type, worker pod, attempt."""
     sched, out = {}, []
     async for ev in client.get_workflow_handle(wid).fetch_history_events():
         if ev.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED:
             sched[ev.event_id] = ev.activity_task_scheduled_event_attributes.activity_type.name
         elif ev.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_STARTED:
             a = ev.activity_task_started_event_attributes
-            out.append((sched[a.scheduled_event_id], a.identity.split("@")[0]))
+            out.append({"type": sched[a.scheduled_event_id], "pod": a.identity.split("@")[0], "attempt": a.attempt})
     return out
 
 
-async def wf_task_identities(client: Client, wid: str) -> list[str]:
-    ids = []
-    async for ev in client.get_workflow_handle(wid).fetch_history_events():
-        if ev.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_STARTED:
-            ids.append(ev.workflow_task_started_event_attributes.identity.split("@")[0])
-    return ids
+async def mock_suite(client: Client, http: httpx.Client, report: dict) -> None:
+    checks = report["checks"]
+    pods = worker_pods()
+    report["pods_before"] = pods
+    print("worker pods:", pods)
+
+    # ---- 1. ten executions ---------------------------------------------------------------
+    execs = [post(http, f"Task {i:03d}: analyse something #{i}", "grok-mock") for i in range(1, 11)]
+    for e in execs:
+        assert e["execution_id"] == e["workflow_id"] == e["session_id"] == e["workspace_id"] != e["run_id"]
+    results = await asyncio.gather(*(result(client, e["workflow_id"]) for e in execs))
+    rows, used, retries = [], set(), 0
+    for e, res in zip(execs, results):
+        acts = await activity_starts(client, e["workflow_id"])
+        used |= {a["pod"] for a in acts}
+        retries += sum(1 for a in acts if a["type"] == MODEL_ACTIVITY and a["attempt"] > 1)
+        rows.append({"execution_id": e["execution_id"], "outcome": res.outcome, "session": res.session_status,
+                     "model_calls": res.model_calls, "activity_pods": dict(Counter(a["pod"] for a in acts))})
+    report["ten_executions"] = rows
+    report["model_activity_retries"] = retries
+    checks["ten_completed_and_closed"] = all(r.outcome == "completed" and r.session_status == "closed" for r in results)
+    checks["both_pods_used"] = len(used) >= 2
+
+    pod_a, pod_b = pods[0], pods[-1]
+    ok = True
+    for e in execs:
+        wid = e["workspace_id"]
+        la = in_pod(pod_a, f"cd /data/workspaces/{wid} && find . -type f | sort")
+        lb = in_pod(pod_b, f"cd /data/workspaces/{wid} && find . -type f | sort")
+        status = json.loads(in_pod(pod_b, f"cat /data/workspaces/{wid}/session.json"))["status"]
+        ok &= EXPECTED <= set(la.split()) and la == lb and status == "closed"
+    checks["workspaces_complete_and_shared"] = ok
+    report["sample_tree"] = in_pod(pod_a, f"cd /data/workspaces && find {execs[0]['workspace_id']} | sort")
+
+    # ---- 2. traversal probe ----------------------------------------------------------------
+    victim = execs[0]["workspace_id"]
+    before = in_pod(pod_a, f"cd /data/workspaces/{victim} && find . -type f | sort")
+    probe = post(http, f"[probe-traversal][probe-target={victim}] try to escape", "grok-mock")
+    pres = await result(client, probe["workflow_id"])
+    psteps = [s for s in pres.tool_steps if s.call_id.startswith("p")]
+    after = in_pod(pod_a, f"cd /data/workspaces/{victim} && find . -type f | sort")
+    report["traversal_probe"] = [s.model_dump() for s in psteps]
+    checks["traversal_rejected"] = (len(psteps) == 6 and not any(s.ok for s in psteps)
+                                    and "pwned" not in after and before == after)
+
+    # ---- 3. SIGKILL a worker while it runs a model activity --------------------------------
+    crash = post(http, "Task CRASH: long running job", "grok-mock")
+    h = client.get_workflow_handle(crash["workflow_id"])
+    victim_pod, deadline = None, time.time() + 90
+    while time.time() < deadline and not victim_pod:
+        desc = await h.describe()
+        pend = [p for p in desc.raw_description.pending_activities if p.last_worker_identity]
+        if pend:
+            victim_pod = pend[0].last_worker_identity.split("@")[0]
+        else:
+            await asyncio.sleep(0.2)
+    assert victim_pod, "never caught an in-flight activity"
+    print(f"SIGKILL worker process in {victim_pod} ({crash['execution_id']})")
+    cid = sh("kubectl", "get", "pod", "-n", NS, victim_pod, "-o",
+             "jsonpath={.status.containerStatuses[0].containerID}").split("//")[-1]
+    node = sh("kubectl", "get", "pod", "-n", NS, victim_pod, "-o", "jsonpath={.spec.nodeName}")
+    pid = sh("docker", "exec", node, "crictl", "inspect", "-o", "go-template", "--template", "{{.info.pid}}", cid).strip()
+    killed_at = time.time()
+    sh("docker", "exec", node, "kill", "-9", pid)
+    cres = await result(client, crash["workflow_id"], 300)
+    acts = await activity_starts(client, crash["workflow_id"])
+    survivor = next(p for p in pods if p != victim_pod)
+    files = in_pod(survivor, f"cd /data/workspaces/{crash['workspace_id']} && find . -type f | sort").split()
+    report["crash"] = {"execution_id": crash["execution_id"], "killed_pod": victim_pod, "survivor": survivor,
+                       "activity_starts": acts, "outcome": cres.outcome, "session": cres.session_status,
+                       "files_seen_by_survivor": files,
+                       "seconds_to_complete_after_kill": round(time.time() - killed_at, 1)}
+    checks["crash_recovered_same_workspace"] = (cres.outcome == "completed" and cres.session_status == "closed"
+                                                and survivor in {a["pod"] for a in acts} and EXPECTED <= set(files))
+    report["pods_after"] = worker_pods()
 
 
-def post(http: httpx.Client, task: str) -> dict:
-    r = http.post(f"{API}/executions", json={"task": task})
-    r.raise_for_status()
-    return r.json()
+async def real_suite(client: Client, http: httpx.Client, report: dict, n: int, model: str) -> None:
+    rows = []
+    for task in (REAL_TASKS * n)[:n]:
+        e = post(http, task, model)
+        res = await result(client, e["workflow_id"], 600)
+        rows.append({"execution_id": e["execution_id"], "model": res.model, "outcome": res.outcome,
+                     "session": res.session_status, "model_calls": res.model_calls,
+                     "tools": [s.name for s in res.tool_steps], "final": res.final[:500]})
+        print(f"real {e['execution_id']}: {res.outcome} ({len(res.tool_steps)} tool calls)")
+    report["real"] = rows
+    report["checks"]["real_runs_completed"] = all(r["outcome"] == "completed" and r["session"] == "closed" for r in rows)
 
 
 async def main() -> int:
+    ap = argparse.ArgumentParser(description="e2e for the WorkspaceAgent deployment")
+    ap.add_argument("--real", type=int, default=0, help="number of short real-model executions")
+    ap.add_argument("--real-model", default="grok-4.6")
+    ap.add_argument("--skip-mock", action="store_true")
+    args = ap.parse_args()
+
     client = await Client.connect(TEMPORAL, plugins=[harness_plugin()])
-    http = httpx.Client(timeout=30)
+    http = httpx.Client(timeout=60)
     report: dict = {"checks": {}}
-    pods = worker_pods()
-    print("worker pods:", pods)
-    report["pods_before"] = pods
+    if not args.skip_mock:
+        await mock_suite(client, http, report)
+    if args.real:
+        await real_suite(client, http, report, args.real, args.real_model)
 
-    # ---- 1. ten executions --------------------------------------------------------------
-    execs = [post(http, f"Task {i:03d}: analyse something #{i}") for i in range(1, 11)]
-    for e in execs:
-        assert e["execution_id"] == e["workflow_id"] == e["session_id"] == e["workspace_id"] != e["run_id"]
-    print(f"submitted {len(execs)} executions")
-    results = await asyncio.gather(
-        *(client.get_workflow_handle(e["workflow_id"], result_type=AgentResult).result() for e in execs)
-    )
-    rows = []
-    for e, res in zip(execs, results):
-        acts = await history_by_activity(client, e["workflow_id"])
-        llm_pods = [p for t, p in acts if t == "llm_call"]
-        all_pods = Counter(p for _, p in acts)
-        rows.append({"execution_id": e["execution_id"], "llm_call_pods": llm_pods, "activity_pods": dict(all_pods),
-                     "workflow_task_pods": dict(Counter(await wf_task_identities(client, e["workflow_id"]))),
-                     "final": res.final, "session": res.session_status})
-    report["ten_executions"] = rows
-    used = set().union(*(r["activity_pods"].keys() for r in rows))
-    report["checks"]["both_pods_used"] = len(used) >= 2
-    print("pods that executed activities across the 10 runs:", sorted(used))
-
-    # workspace contents, seen from BOTH pods (shared PVC)
-    pod_a, pod_b = pods[0], pods[-1]
-    ok_files = True
-    for e in execs:
-        wid = e["workspace_id"]
-        listing_a = in_pod(pod_a, f"cd /data/workspaces/{wid} && find . -type f | sort")
-        listing_b = in_pod(pod_b, f"cd /data/workspaces/{wid} && find . -type f | sort")
-        expected = {"./session.json", "./input/task.md", "./output/plan.md", "./output/result.md",
-                    "./temp/step-000.json", "./temp/step-001.json", "./temp/step-002.json"}
-        files = set(listing_a.split())
-        status = json.loads(in_pod(pod_b, f"cat /data/workspaces/{wid}/session.json"))["status"]
-        task = in_pod(pod_a, f"cat /data/workspaces/{wid}/input/task.md")
-        good = files == expected and listing_a == listing_b and status == "closed" and wid in in_pod(
-            pod_b, f"cat /data/workspaces/{wid}/output/plan.md")
-        ok_files &= good and task.startswith("Task ")
-    report["checks"]["workspaces_complete_and_shared"] = ok_files
-    report["workspace_dirs"] = in_pod(pod_a, "ls /data/workspaces").split()
-    report["sample_tree"] = in_pod(pod_a, f"cd /data/workspaces && find {execs[0]['workspace_id']} | sort")
-
-    # ---- 2. traversal probe ---------------------------------------------------------------
-    victim = execs[0]["workspace_id"]
-    probe = post(http, f"[probe-traversal][probe-target={victim}] try to escape")
-    pres = await client.get_workflow_handle(probe["workflow_id"], result_type=AgentResult).result()
-    step = next(s for s in pres.steps if any(c.id == "p1" for c in s.tool_calls))
-    report["traversal_probe"] = [
-        {"call": c.model_dump(), "ok": r.ok, "output": r.output} for c, r in zip(step.tool_calls, step.tool_results)
-    ]
-    pwned = in_pod(pod_a, f"ls /data/workspaces/{victim}/output").split()
-    report["checks"]["traversal_rejected"] = (not any(r.ok for r in step.tool_results)) and "pwned.md" not in pwned
-    print("traversal probe results:", [(c.args["path"], r.output[:60]) for c, r in zip(step.tool_calls, step.tool_results)])
-
-    # ---- 3. crash recovery ------------------------------------------------------------------
-    crash = post(http, "Task CRASH: long running job")
-    h = client.get_workflow_handle(crash["workflow_id"], result_type=AgentResult)
-    victim_pod = None
-    deadline = time.time() + 60
-    while time.time() < deadline:
-        desc = await h.describe()
-        done_llm = [t for t, _ in await history_by_activity(client, crash["workflow_id"]) if t == "llm_call"]
-        pend = [p for p in desc.raw_description.pending_activities
-                if p.activity_type.name == "llm_call" and p.last_worker_identity]
-        if len(done_llm) >= 2 and pend:  # mid-run: >=1 llm step done, another in flight
-            victim_pod = pend[0].last_worker_identity.split("@")[0]
-            break
-        await asyncio.sleep(0.3)
-    assert victim_pod, "never caught an in-flight llm_call"
-    print(f"killing pod {victim_pod} while it runs llm_call of {crash['execution_id']}")
-    killed_at = time.time()
-    if os.environ.get("CRASH_MODE", "delete") == "sigkill":
-        # hard crash: SIGKILL the worker process from the kind node (no SIGTERM, no graceful shutdown)
-        cid = sh("kubectl", "get", "pod", "-n", NS, victim_pod, "-o",
-                 "jsonpath={.status.containerStatuses[0].containerID}").split("//")[-1]
-        node = sh("kubectl", "get", "pod", "-n", NS, victim_pod, "-o", "jsonpath={.spec.nodeName}")
-        pid = sh("docker", "exec", node, "crictl", "inspect", "-o", "go-template", "--template", "{{.info.pid}}", cid).strip()
-        sh("docker", "exec", node, "kill", "-9", pid)
-    else:
-        sh("kubectl", "delete", "pod", "-n", NS, victim_pod, "--grace-period=0", "--force", "--wait=false")
-    cres = await asyncio.wait_for(h.result(), 180)
-    recovered_in = time.time() - killed_at
-    acts = await history_by_activity(client, crash["workflow_id"])
-    survivor = [p for p in pods if p != victim_pod][0]
-    retries = []
-    async for ev in h.fetch_history_events():
-        if ev.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_STARTED:
-            a = ev.activity_task_started_event_attributes
-            if a.attempt > 1:
-                retries.append({"attempt": a.attempt, "by": a.identity.split("@")[0], "last_failure": a.last_failure.message})
-    files = in_pod(survivor, f"cd /data/workspaces/{crash['workspace_id']} && find . -type f | sort").split()
-    steps_by_pod = [{"step": s.step, "llm_worker": s.llm_worker} for s in cres.steps]
-    report["crash"] = {
-        "execution_id": crash["execution_id"], "killed_pod": victim_pod, "survivor": survivor,
-        "activity_starts": acts, "retries": retries, "mode": os.environ.get("CRASH_MODE", "delete"), "steps": steps_by_pod, "final": cres.final, "session": cres.session_status,
-        "workspace_files_seen_by_survivor": files, "seconds_to_complete_after_kill": round(recovered_in, 1),
-    }
-    pods_used = {p for _, p in acts}
-    report["checks"]["crash_recovered_same_workspace"] = (
-        victim_pod in pods_used and survivor in pods_used and cres.session_status == "closed"
-        and "./output/result.md" in files and "./input/task.md" in files
-    )
-    report["pods_after"] = worker_pods()
-    print("crash run activity starts:", acts)
-
-    # ---- 4. mock-llm request log -----------------------------------------------------------
-    logs = [json.loads(l) for l in sh("kubectl", "logs", "-n", NS, "deploy/mock-llm").splitlines() if l.startswith("{")]
-    chat = [l for l in logs if l.get("event") == "chat.completions"]
-    faulted = {l["req_hash"] for l in chat if l["fault"]}
-    ok_hashes = {l["req_hash"] for l in chat if l["status"] == 200}
-    report["mock_llm"] = {
-        "chat_requests": len(chat),
-        "by_status": dict(Counter(l["status"] for l in chat)),
-        "faults_injected": sum(1 for l in chat if l["fault"]),
-        "faulted_requests_later_succeeded": len(faulted & ok_hashes),
-        "faulted_requests_never_succeeded": sorted(faulted - ok_hashes),
-        "requests_by_client_pod": dict(Counter(l["client"] for l in chat)),
-    }
-    report["checks"]["llm_faults_retried_ok"] = bool(faulted) and not (faulted - ok_hashes)
-    print("mock-llm:", json.dumps(report["mock_llm"]))
-
-    json.dump(report, open(os.environ.get("E2E_REPORT", "e2e-out/report.json"), "w"), indent=2, default=str)
+    Path("e2e-out").mkdir(exist_ok=True)
+    Path("e2e-out/report.json").write_text(json.dumps(report, indent=2, default=str))
     print(json.dumps(report["checks"], indent=2))
     return 0 if all(report["checks"].values()) else 1
 

@@ -15,7 +15,7 @@ def client():
 
 
 def body(messages, **kw):
-    tools = [{"type": "function", "function": {"name": n, "parameters": {}}} for n in ("write_file", "read_file", "list_files")]
+    tools = [{"type": "function", "function": {"name": n, "parameters": {}}} for n in ("write_file", "read_file", "list_files", "run_code")]
     return {"model": "grok-mock", "messages": messages, "tools": tools, **kw}
 
 

@@ -25,7 +25,7 @@ from pydantic import BaseModel, field_validator
 from temporal_agent_harness.harness.code_mode.activity_fs import ActivityFileSystem
 from temporal_agent_harness.harness.code_mode.vfs import FileStat
 
-from .models import EXECUTION_ID_RE
+from .shared import EXECUTION_ID_RE
 
 
 def workspaces_root() -> Path:

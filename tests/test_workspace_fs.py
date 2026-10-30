@@ -3,7 +3,7 @@ from pathlib import Path, PurePosixPath as P
 
 import pytest
 
-from temporal_agent_demo.models import ExecutionContext, new_execution_id
+from temporal_agent_demo.shared import ExecutionContext, new_execution_id
 from temporal_agent_demo.workspace_fs import WorkspaceDisk, WorkspaceDiskConfig
 
 

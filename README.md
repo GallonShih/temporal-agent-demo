@@ -1,79 +1,55 @@
 # temporal-agent-demo
 
 2 identical Temporal agent workers (k8s Deployment `agent-worker`, replicas=2) on one task queue `agent`,
-one shared PVC `agent-workspaces`, and one isolated workspace per execution. LLM is mocked.
+one shared PVC `agent-workspaces`, and one isolated workspace per execution. The model is Grok (via a host-side
+LLM gateway) or a scripted mock (`grok-mock`).
 
-## What is real harness vs. hand-written
-* Uses **temporal-agent-harness 0.8.0** (PyPI, temporal-community/temporal-agent-harness):
-  * `AgentHarnessPlugin(filesystems=[WorkspaceDisk], large_payload_offload=local_payload_storage(/data/payloads))`
-    -> Pydantic data converter, large-payload offload (pointed at the shared PVC), and the
-    `vfs.workspace-disk.*` activities.
-  * `WorkspaceDisk` is a harness `ActivityFileSystem` (same pattern as the LocalDisk / code-mode memory
-    example) whose root is `/data/workspaces/<workspace_id>`; the workflow uses `WorkspaceDisk.backend(cfg)`.
-* The agent loop itself is a plain Temporal workflow (`AgentWorkflow`) + `llm_call` activity, NOT the harness's
-  `@agent.defn` / `AgentWorkflowRunner` / OpenAIAgentsPlugin session runtime (that needs a real AI-SDK model
-  integration + session manager; out of scope while the LLM is mocked).
+## Runtime
+* **temporal-agent-harness 0.8.0** session runtime: `WorkspaceAgent` is an `@agent.defn` agent with a VFS mount
+  `/workspace` -> `WorkspaceDisk`, the Code Mode tool `run_code`, and the tools write_file / read_file / list_files.
+* `AgentHarnessPlugin(filesystems=[WorkspaceDisk], large_payload_offload=local_payload_storage(/data/payloads))`
+  provides the Pydantic converter, payload offload on the shared PVC and the `vfs.workspace-disk.*` activities;
+  `OpenAIAgentsPlugin` (chat completions -> `OPENAI_BASE_URL`) provides `invoke_model_activity`.
+  There are no hand-written activities.
+* `POST /executions` (or `starter.py`) starts the session with update-with-start
+  (`AgentClient.start_and_submit_message`); the session closes itself after its task.
+* `execution_id == workflow_id == session_id == workspace_id`, fresh per execution.
 
 ## Layout
 ```
 src/temporal_agent_demo/
-  models.py        ExecutionContext (execution_id == workflow_id == session_id == workspace_id), LLM/tool models
-  workspace_fs.py  WorkspaceDisk: path confinement + atomic idempotent writes
-  llm.py           LLMClient interface, in-process MockLLM, OpenAICompatibleLLM (httpx), `llm_call` activity
-  workflow.py      AgentWorkflow: bind workspace -> loop(llm -> tools) -> explicitly close session
+  shared.py        constants, ExecutionContext, models (WorkspaceSession, TaskMessage, ToolStep, TaskResult)
+  workflows.py     WorkspaceAgent (@agent.defn): bind workspace -> run task -> write outputs -> close session
+  tools.py         workflow-side tools (write_file / read_file / list_files) confined to /workspace
+                   (named tools.py, not activities.py: they are @agent.tool_defn tools; their file ops run as
+                   the harness's vfs.workspace-disk.* activities)
+  workspace_fs.py  WorkspaceDisk: per-workspace root, path confinement, atomic idempotent writes
   worker.py        worker process (task queue `agent`)
-  api.py           FastAPI: POST /executions (generates id, starts workflow), GET /executions/{id}
-  config.py        Temporal client + AgentHarnessPlugin
-mock_llm_server/   standalone OpenAI-compatible mock provider (FastAPI) + its Dockerfile (image mock-llm:dev)
+  starter.py       CLI: start one execution and print its result
+  api.py           FastAPI: POST /executions, GET /executions/{id}, POST /executions/{id}/close, /healthz
+  config.py        Temporal client, AgentHarnessPlugin + OpenAIAgentsPlugin (tracing disabled)
+llm_gateway/       host-side OpenAI-compatible gateway: real Grok (Hermes xAI OAuth) or the mock
+mock_llm_server/   scripted OpenAI-compatible mock (used in-process by the gateway and by tests)
 tests/             pytest (local Temporal dev server via temporalio.testing; no k8s)
-k8s/               namespace, PVC, llm-api-key Secret, mock-llm Deployment+Service, worker Deployment (x2), API
-scripts/deploy.sh  build -> kind load -> apply
-scripts/e2e.py     10 executions, traversal probe, kill-a-pod crash recovery, mock-llm log audit
+k8s/               namespace, PVC, llm-api-key Secret, worker Deployment (x2), API
+scripts/           start-gateway.sh, deploy.sh (build -> kind load -> apply), e2e.py
 ```
 
 ## Run
 ```bash
 uv sync
-uv run pytest -v                      # unit + integration (downloads temporal dev server once)
+uv run pytest -q tests                                  # unit + integration (downloads temporal dev server once)
 
-TEMPORAL_ADDRESS=<frontend-svc>.<ns>.svc.cluster.local:7233 scripts/deploy.sh
+scripts/start-gateway.sh                                # host gateway on :8787 (GATEWAY_MODE=mock for the mock)
+TEMPORAL_ADDRESS=temporal-frontend.temporal.svc.cluster.local:7233 scripts/deploy.sh
 kubectl port-forward -n agent-demo svc/agent-api 18000:8000 &
-kubectl port-forward -n <temporal-ns> svc/<frontend-svc> 17233:7233 &
-mkdir -p e2e-out && uv run python scripts/e2e.py     # writes e2e-out/report.json (crash = kubectl delete --force)
-CRASH_MODE=sigkill E2E_REPORT=e2e-out/report-sigkill.json uv run python scripts/e2e.py   # crash = SIGKILL worker process
+kubectl port-forward -n temporal svc/temporal-frontend 17233:7233 &
 
-curl -XPOST localhost:18000/executions -H 'content-type: application/json' -d '{"task":"hello"}'
+curl -XPOST localhost:18000/executions -H 'content-type: application/json' -d '{"task":"hello","model":"grok-4.6"}'
+TEMPORAL_ADDRESS=localhost:17233 uv run python -m temporal_agent_demo.starter "Write a haiku to /workspace/output/haiku.md"
+MOCK_LATENCY_S=2 MOCK_FAULT_EVERY=4 scripts/start-gateway.sh   # mock latency + faults for the e2e
+uv run python scripts/e2e.py [--real 2]                  # see the script docstring; writes e2e-out/report.json
 ```
-
-## LLM: mock-llm service (OpenAI-compatible), like an agent talking to xAI / SuperGrok
-Workers run `LLM_BACKEND=openai` and call `POST $OPENAI_BASE_URL/chat/completions` with `tools`
-(write_file / read_file / list_files) over HTTP, Bearer key from Secret `llm-api-key`.
-In k8s: `OPENAI_BASE_URL=http://mock-llm.agent-demo.svc:8000/v1`, `OPENAI_MODEL=grok-mock`.
-
-mock-llm (`mock_llm_server/app.py`):
-* `GET /v1/models`, `POST /v1/chat/completions` (function calling; deterministic scripted plan ->
-  tool_calls ... then a final message), `GET /v1/stats`, `GET /healthz`.
-* Bearer key required (`MOCK_API_KEYS`; empty = any non-empty key). Wrong model -> 404.
-* `stream: true` is NOT supported (400).
-* Latency `MOCK_LATENCY_S`; fault injection `MOCK_FAULT_EVERY=N` (requests whose hash % N == 0 fail
-  `MOCK_FAULT_ATTEMPTS` times with a code from `MOCK_FAULT_CODES`, then succeed), `MOCK_FAULT_RATE`
-  (random), or per request header `X-Mock-Fault: 429|500|...`. 429 sends `Retry-After: 1`.
-* One JSON log line per request (status, fault, req_hash, client pod, ms).
-
-Error mapping in `OpenAICompatibleLLM`: 429/408/409/5xx/network -> retryable `ApplicationError`
-(Temporal activity retry, honours Retry-After); other 4xx (bad key, unknown model) -> non-retryable.
-
-### Point it at a real provider (e.g. xAI)
-```bash
-kubectl -n agent-demo create secret generic llm-api-key --from-literal=api-key="$XAI_API_KEY" \
-  --dry-run=client -o yaml | kubectl apply -f -
-kubectl -n agent-demo set env deploy/agent-worker OPENAI_BASE_URL=https://api.x.ai/v1 OPENAI_MODEL=<grok model id>
-kubectl -n agent-demo delete deploy/mock-llm svc/mock-llm   # optional
-```
-(the kind node needs internet egress for that). Locally: `LLM_BACKEND=openai OPENAI_BASE_URL=... OPENAI_API_KEY=... OPENAI_MODEL=...`.
-`LLM_BACKEND=mock` still selects the in-process MockLLM.
-
-Run mock-llm locally: `MOCK_API_KEYS=sk-x uv run uvicorn mock_llm_server.app:app --port 8001`
 
 ## LLM: host-side gateway → real Grok via SuperGrok (Hermes xAI OAuth)
 
@@ -104,13 +80,11 @@ scripts/start-gateway.sh                          # xai-oauth on :8787; prints P
 GATEWAY_MODE=mock scripts/start-gateway.sh        # switch to the mock (restarts the gateway)
 TEMPORAL_ADDRESS=temporal-frontend.temporal.svc.cluster.local:7233 scripts/deploy.sh
 #   -> workers get OPENAI_BASE_URL=http://<kind gateway>:8787/v1, OPENAI_MODEL=grok-4.6 (override via env)
-uv run python scripts/e2e_real.py                 # 3 short real tasks + 1 traversal probe -> e2e-out/report-real.json
+uv run python scripts/e2e.py --skip-mock --real 3  # 3 short real tasks -> e2e-out/report.json
 ```
 
 The gateway must run in Hermes's Python runtime (`hermes --print-runtime-command` plus `hermes_bootstrap`), which
-`start-gateway.sh` handles. The in-cluster `mock-llm` Deployment is kept at `replicas: 0`. To use it again, scale it to 1
-and set `OPENAI_BASE_URL=http://mock-llm.agent-demo.svc:8000/v1 OPENAI_MODEL=grok-mock`. `scripts/e2e.py` (the fault-injection
-audit) expects that setup.
+`start-gateway.sh` handles. Mock latency / fault injection: `MOCK_LATENCY_S`, `MOCK_FAULT_*` on the gateway.
 
 ## Caveats
 * kind is single-node: PVC is RWO (local-path). Multi-node needs RWX (NFS/EFS/CephFS).
@@ -121,15 +95,3 @@ audit) expects that setup.
   Some subscription tiers get HTTP 403 on the API (Hermes issue #26847). The gateway passes that through as non-retryable.
 * The gateway listens on 0.0.0.0:8787 and is protected only by the local bearer key. Firewall it if the box is exposed.
 * Real-model runs spend subscription quota. The 4-execution e2e used about 12k tokens.
-
-
-## Phase 4: native temporal-agent-harness runtime (WIP)
-
-The agent is now `WorkspaceAgent` (`src/temporal_agent_demo/agent.py`), defined with
-`@agent.defn`. It has a VFS mount `/workspace` → `WorkspaceDisk`, the Code Mode tool `run_code`,
-the inline tools write_file, read_file and list_files, and OpenAIAgentsPlugin chat-completions
-pointed at the gateway. `POST /executions` starts the session through update-with-start
-(`AgentClient.start_and_submit_message`), and the session closes itself after its task.
-The old hand-written AgentWorkflow lives in `temporal_agent_demo/legacy/`. Set
-`AGENT_ENABLE_LEGACY=1` to register it, and use `engine=legacy` on the API.
-Tests: `uv run pytest -q tests` (38 tests: 8 native and 30 legacy/gateway/fs).

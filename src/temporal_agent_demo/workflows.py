@@ -1,4 +1,4 @@
-"""WorkspaceAgent: the agent on temporal-agent-harness's NATIVE session runtime.
+"""Workflow definition: WorkspaceAgent on temporal-agent-harness's native session runtime.
 
 One agent session == one workflow execution == one workspace:
     execution_id == workflow_id == session_id == workspace_id   (never the Temporal run_id)
@@ -15,14 +15,14 @@ Harness pieces used
   ``/data/workspaces/<execution id>`` (atomic, idempotent writes).
 * ``agent.code_mode_tool([], name="run_code", mounts=[workspace])``: Code Mode (Monty sandbox)
   scripts that read/write ``/workspace`` with ``open()`` / ``pathlib``.
-* Three plain ``@agent.tool_defn`` file tools over the same bound mount (cheap single-file ops).
+* Three plain ``@agent.tool_defn`` file tools (tools.py) over the same bound mount.
 * OpenAI Agents SDK ``Agent`` + ``Runner.run`` (non-streamed) with harness tools adapted by
   ``as_openai_agent_tool``; the ``OpenAIAgentsPlugin`` turns every model call into a
   ``invoke_model_activity`` (chat-completions against the host llm_gateway / mock).
 
 Lifecycle: the API starts the session AND submits the task in one call
 (``AgentClient.start_and_submit_message`` = Temporal update-with-start). ``run_task`` runs the
-task, then CLOSES the session itself (the harness ``close`` signal, sent to its own workflow);
+task, then CLOSES the session itself (the harness's ``close`` handler; a workflow cannot signal itself);
 ``@agent.teardown`` then writes ``session.json`` with status ``closed`` and the workflow completes.
 """
 
@@ -33,7 +33,6 @@ from datetime import timedelta
 from pathlib import PurePosixPath
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
 from temporalio import workflow
 from temporalio.contrib.workflow_streams import WorkflowStream
 from temporalio.exceptions import ActivityError, ApplicationError
@@ -46,14 +45,11 @@ with workflow.unsafe.imports_passed_through():
     from temporal_agent_harness.ai_sdks.openai_agents_harness import as_openai_agent_tool
     from temporal_agent_harness.harness import agent
     from temporal_agent_harness.harness.agent_protocol import AgentConfig, MidTurn, ToolApprovalPolicy
-    from temporal_agent_harness.harness.agent_workflow import AgentWorkflowRunner, Injected
+    from temporal_agent_harness.harness.agent_workflow import AgentWorkflowRunner
 
-    from .models import EXECUTION_ID_RE
+    from .shared import AGENT_NAME, MAX_OUTPUT, MOUNT, TaskMessage, TaskResult, ToolStep, WorkspaceSession
+    from .tools import FILE_TOOLS
     from .workspace_fs import WorkspaceDisk, WorkspaceDiskConfig
-
-AGENT_NAME = "WorkspaceAgent"
-MOUNT = "/workspace"
-MAX_OUTPUT = 4000
 
 SYSTEM_PROMPT = f"""\
 You are a file-working agent. Your private workspace is mounted at `{MOUNT}` (input/, output/, temp/).
@@ -61,98 +57,6 @@ Only paths under `{MOUNT}` exist for you. Do the task by calling tools and put d
 `{MOUNT}/output/`. Use `write_file` / `read_file` / `list_files` for single-file operations, and \
 `run_code` for multi-step file work in one script. When finished, reply with a one-paragraph \
 summary and no tool calls."""
-
-
-# ---------------------------------------------------------------- session data / messages / results
-class WorkspaceSession(BaseModel):
-    """Init data (second workflow argument). Chosen by the Execution Manager, never the model."""
-
-    execution_id: str
-    model: str = "grok-4.6"
-    max_turns: int = Field(default=12, ge=1, le=50)
-
-    @field_validator("execution_id")
-    @classmethod
-    def _shape(cls, v: str) -> str:
-        if not EXECUTION_ID_RE.fullmatch(v):
-            raise ValueError(f"invalid execution id {v!r}")
-        return v
-
-
-class TaskMessage(BaseModel):
-    """The task for this session's agent to carry out in its workspace."""
-
-    task: str = Field(min_length=1, max_length=20_000)
-
-
-class ToolStep(BaseModel):
-    """One tool call the model made and what it returned."""
-
-    call_id: str
-    name: str
-    arguments: str
-    output: str | None = None
-    ok: bool | None = None
-
-
-class TaskResult(BaseModel):
-    """Outcome of the session's task."""
-
-    execution_id: str
-    session_id: str
-    workspace_id: str
-    run_id: str
-    outcome: str  # completed | failed
-    final: str
-    session_status: str  # open | closed
-    model: str
-    tool_steps: list[ToolStep] = []
-    model_calls: int = 0
-
-
-# ---------------------------------------------------------------- tools over the bound mount
-# NB: the harness calls user_fn(*model_args, **injected, **model_kwargs), so Injected params must
-# come after the model params (keyword-only here).
-def _rel(path: str) -> PurePosixPath:
-    """Virtual path -> path relative to the workspace. '..' is NOT collapsed here: WorkspaceDisk
-    (inside the activity) is the authority and rejects it."""
-    p = PurePosixPath(path)
-    if p.is_absolute():
-        if p == PurePosixPath(MOUNT):
-            return PurePosixPath(".")
-        if not str(p).startswith(MOUNT + "/"):
-            raise PermissionError(f"PermissionError: path outside {MOUNT}: {path!r}")
-        p = PurePosixPath(str(p)[len(MOUNT) + 1 :])
-    return p
-
-
-async def _fs(op: str, fs: Any, *args: Any) -> Any:
-    try:
-        return await getattr(fs, op)(*args)
-    except ActivityError as e:  # surface WorkspaceDisk's PermissionError etc. to the model
-        c = e.cause
-        kind = getattr(c, "type", None) or type(c).__name__
-        raise ApplicationError(f"{kind}: {getattr(c, 'message', c)}", type=kind, non_retryable=True) from None
-
-
-@agent.tool_defn(inherently_safe=True)
-async def write_file(path: str, content: str, *, ws: Injected[Any]) -> str:
-    """Write (create or replace) a UTF-8 text file. `path` is under /workspace, e.g. /workspace/output/report.md."""
-    await _fs("write", ws, _rel(path), content.encode())
-    return f"wrote {path} ({len(content.encode())} bytes)"
-
-
-@agent.tool_defn(inherently_safe=True)
-async def read_file(path: str, *, ws: Injected[Any]) -> str:
-    """Read a UTF-8 text file under /workspace."""
-    data: bytes = await _fs("read", ws, _rel(path))
-    return data.decode(errors="replace")[:MAX_OUTPUT]
-
-
-@agent.tool_defn(inherently_safe=True)
-async def list_files(path: str = MOUNT, *, ws: Injected[Any]) -> list[str]:
-    """List a directory under /workspace (default: the workspace root)."""
-    return await _fs("list", ws, _rel(path))
 
 
 # ---------------------------------------------------------------- the agent
@@ -210,7 +114,7 @@ class WorkspaceAgent:
             instructions=f"{SYSTEM_PROMPT}\nsession_id={self._data.execution_id}",
             model=self._data.model,
             tools=[as_openai_agent_tool(self._runner, t, injections=injections)
-                   for t in (write_file, read_file, list_files)]
+                   for t in FILE_TOOLS]
                   + [as_openai_agent_tool(self._runner, self._code_tool)],
         )
         items: list[Any] = []
@@ -235,10 +139,9 @@ class WorkspaceAgent:
             execution_id=info.workflow_id, session_id=info.workflow_id, workspace_id=self._data.execution_id,
             run_id=info.run_id, outcome=outcome, final=final, session_status="closed",
             model=self._data.model, tool_steps=steps, model_calls=model_calls)
-        # Explicitly end the session: the harness's own `close` signal, sent to this workflow.
-        # The turn loop drains this turn, then teardown writes session.json "closed".
-        # (A workflow cannot signal itself -- Temporal answers EXTERNAL_WORKFLOW_EXECUTION_NOT_FOUND --
-        # so call the harness's own close-signal handler directly; same effect as the signal.)
+        # Explicitly end the session. A workflow cannot signal itself (Temporal answers
+        # EXTERNAL_WORKFLOW_EXECUTION_NOT_FOUND), so call the handler the harness registers for its
+        # `close` signal; the turn loop drains this turn, then teardown writes session.json "closed".
         self._runner._handle_close()
         return self._result
 
