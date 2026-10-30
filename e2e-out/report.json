@@ -1,0 +1,357 @@
+{
+  "checks": {
+    "both_pods_used": true,
+    "workspaces_complete_and_shared": true,
+    "traversal_rejected": true,
+    "crash_recovered_same_workspace": true
+  },
+  "pods_before": [
+    "agent-worker-5dbc4d59f-6qlwj",
+    "agent-worker-5dbc4d59f-hjwfr"
+  ],
+  "ten_executions": [
+    {
+      "execution_id": "exec-41e1c3976bb14327b24656d2cebfc568",
+      "llm_call_pods": [
+        "agent-worker-5dbc4d59f-6qlwj",
+        "agent-worker-5dbc4d59f-6qlwj",
+        "agent-worker-5dbc4d59f-6qlwj",
+        "agent-worker-5dbc4d59f-6qlwj"
+      ],
+      "activity_pods": {
+        "agent-worker-5dbc4d59f-6qlwj": 19
+      },
+      "workflow_task_pods": {
+        "agent-worker-5dbc4d59f-6qlwj": 20
+      },
+      "final": "DONE exec-41e1c3976bb14327b24656d2cebfc568 digest=8e806dcdd79e",
+      "session": "closed"
+    },
+    {
+      "execution_id": "exec-200c0fab5736491fb4b8448f85406277",
+      "llm_call_pods": [
+        "agent-worker-5dbc4d59f-hjwfr",
+        "agent-worker-5dbc4d59f-hjwfr",
+        "agent-worker-5dbc4d59f-hjwfr",
+        "agent-worker-5dbc4d59f-hjwfr"
+      ],
+      "activity_pods": {
+        "agent-worker-5dbc4d59f-hjwfr": 19
+      },
+      "workflow_task_pods": {
+        "agent-worker-5dbc4d59f-hjwfr": 20
+      },
+      "final": "DONE exec-200c0fab5736491fb4b8448f85406277 digest=e6e079a995ab",
+      "session": "closed"
+    },
+    {
+      "execution_id": "exec-8a18bab4817c428cbbedbe3c6fe57d5f",
+      "llm_call_pods": [
+        "agent-worker-5dbc4d59f-6qlwj",
+        "agent-worker-5dbc4d59f-6qlwj",
+        "agent-worker-5dbc4d59f-6qlwj",
+        "agent-worker-5dbc4d59f-6qlwj"
+      ],
+      "activity_pods": {
+        "agent-worker-5dbc4d59f-6qlwj": 19
+      },
+      "workflow_task_pods": {
+        "agent-worker-5dbc4d59f-6qlwj": 20
+      },
+      "final": "DONE exec-8a18bab4817c428cbbedbe3c6fe57d5f digest=a8b8220ea3df",
+      "session": "closed"
+    },
+    {
+      "execution_id": "exec-82c34128287f4e449b632a0607a989a1",
+      "llm_call_pods": [
+        "agent-worker-5dbc4d59f-hjwfr",
+        "agent-worker-5dbc4d59f-hjwfr",
+        "agent-worker-5dbc4d59f-hjwfr",
+        "agent-worker-5dbc4d59f-hjwfr"
+      ],
+      "activity_pods": {
+        "agent-worker-5dbc4d59f-hjwfr": 19
+      },
+      "workflow_task_pods": {
+        "agent-worker-5dbc4d59f-hjwfr": 20
+      },
+      "final": "DONE exec-82c34128287f4e449b632a0607a989a1 digest=b99155fbae9b",
+      "session": "closed"
+    },
+    {
+      "execution_id": "exec-cad48c55ebaf4e068ccef695ec6f250c",
+      "llm_call_pods": [
+        "agent-worker-5dbc4d59f-6qlwj",
+        "agent-worker-5dbc4d59f-6qlwj",
+        "agent-worker-5dbc4d59f-6qlwj",
+        "agent-worker-5dbc4d59f-6qlwj"
+      ],
+      "activity_pods": {
+        "agent-worker-5dbc4d59f-6qlwj": 19
+      },
+      "workflow_task_pods": {
+        "agent-worker-5dbc4d59f-6qlwj": 20
+      },
+      "final": "DONE exec-cad48c55ebaf4e068ccef695ec6f250c digest=8e6d285cc7d6",
+      "session": "closed"
+    },
+    {
+      "execution_id": "exec-d56b9bf5e2d44615a0aab482de28a8d9",
+      "llm_call_pods": [
+        "agent-worker-5dbc4d59f-hjwfr",
+        "agent-worker-5dbc4d59f-hjwfr",
+        "agent-worker-5dbc4d59f-hjwfr",
+        "agent-worker-5dbc4d59f-hjwfr"
+      ],
+      "activity_pods": {
+        "agent-worker-5dbc4d59f-hjwfr": 19
+      },
+      "workflow_task_pods": {
+        "agent-worker-5dbc4d59f-hjwfr": 20
+      },
+      "final": "DONE exec-d56b9bf5e2d44615a0aab482de28a8d9 digest=a1a2f6bc65a7",
+      "session": "closed"
+    },
+    {
+      "execution_id": "exec-dbaa1a5eabea47b8baab2a5573358c4b",
+      "llm_call_pods": [
+        "agent-worker-5dbc4d59f-6qlwj",
+        "agent-worker-5dbc4d59f-6qlwj",
+        "agent-worker-5dbc4d59f-6qlwj",
+        "agent-worker-5dbc4d59f-6qlwj"
+      ],
+      "activity_pods": {
+        "agent-worker-5dbc4d59f-6qlwj": 19
+      },
+      "workflow_task_pods": {
+        "agent-worker-5dbc4d59f-6qlwj": 20
+      },
+      "final": "DONE exec-dbaa1a5eabea47b8baab2a5573358c4b digest=fed6b131d703",
+      "session": "closed"
+    },
+    {
+      "execution_id": "exec-e4a6277e42fb4780b05cea800a100ace",
+      "llm_call_pods": [
+        "agent-worker-5dbc4d59f-hjwfr",
+        "agent-worker-5dbc4d59f-hjwfr",
+        "agent-worker-5dbc4d59f-hjwfr",
+        "agent-worker-5dbc4d59f-hjwfr"
+      ],
+      "activity_pods": {
+        "agent-worker-5dbc4d59f-hjwfr": 19
+      },
+      "workflow_task_pods": {
+        "agent-worker-5dbc4d59f-hjwfr": 20
+      },
+      "final": "DONE exec-e4a6277e42fb4780b05cea800a100ace digest=9c027ca39e8c",
+      "session": "closed"
+    },
+    {
+      "execution_id": "exec-aafad4c0e14541f3b599611f367286b8",
+      "llm_call_pods": [
+        "agent-worker-5dbc4d59f-6qlwj",
+        "agent-worker-5dbc4d59f-6qlwj",
+        "agent-worker-5dbc4d59f-6qlwj",
+        "agent-worker-5dbc4d59f-6qlwj"
+      ],
+      "activity_pods": {
+        "agent-worker-5dbc4d59f-6qlwj": 19
+      },
+      "workflow_task_pods": {
+        "agent-worker-5dbc4d59f-6qlwj": 20
+      },
+      "final": "DONE exec-aafad4c0e14541f3b599611f367286b8 digest=9336125dd7bb",
+      "session": "closed"
+    },
+    {
+      "execution_id": "exec-18bf3cd570184d419171f0807d41aa29",
+      "llm_call_pods": [
+        "agent-worker-5dbc4d59f-hjwfr",
+        "agent-worker-5dbc4d59f-hjwfr",
+        "agent-worker-5dbc4d59f-hjwfr",
+        "agent-worker-5dbc4d59f-hjwfr"
+      ],
+      "activity_pods": {
+        "agent-worker-5dbc4d59f-hjwfr": 19
+      },
+      "workflow_task_pods": {
+        "agent-worker-5dbc4d59f-hjwfr": 20
+      },
+      "final": "DONE exec-18bf3cd570184d419171f0807d41aa29 digest=910d613b2867",
+      "session": "closed"
+    }
+  ],
+  "workspace_dirs": [
+    "exec-18bf3cd570184d419171f0807d41aa29",
+    "exec-200c0fab5736491fb4b8448f85406277",
+    "exec-41e1c3976bb14327b24656d2cebfc568",
+    "exec-82c34128287f4e449b632a0607a989a1",
+    "exec-8a18bab4817c428cbbedbe3c6fe57d5f",
+    "exec-aafad4c0e14541f3b599611f367286b8",
+    "exec-cad48c55ebaf4e068ccef695ec6f250c",
+    "exec-d56b9bf5e2d44615a0aab482de28a8d9",
+    "exec-dbaa1a5eabea47b8baab2a5573358c4b",
+    "exec-e4a6277e42fb4780b05cea800a100ace"
+  ],
+  "sample_tree": "exec-41e1c3976bb14327b24656d2cebfc568\nexec-41e1c3976bb14327b24656d2cebfc568/input\nexec-41e1c3976bb14327b24656d2cebfc568/input/task.md\nexec-41e1c3976bb14327b24656d2cebfc568/output\nexec-41e1c3976bb14327b24656d2cebfc568/output/plan.md\nexec-41e1c3976bb14327b24656d2cebfc568/output/result.md\nexec-41e1c3976bb14327b24656d2cebfc568/session.json\nexec-41e1c3976bb14327b24656d2cebfc568/temp\nexec-41e1c3976bb14327b24656d2cebfc568/temp/step-000.json\nexec-41e1c3976bb14327b24656d2cebfc568/temp/step-001.json\nexec-41e1c3976bb14327b24656d2cebfc568/temp/step-002.json\n",
+  "traversal_probe": [
+    {
+      "call": {
+        "id": "p1",
+        "name": "read_file",
+        "args": {
+          "path": "../exec-41e1c3976bb14327b24656d2cebfc568/input/task.md"
+        }
+      },
+      "ok": false,
+      "output": "PermissionError: path escapes workspace: '../exec-41e1c3976bb14327b24656d2cebfc568/input/task.md'"
+    },
+    {
+      "call": {
+        "id": "p2",
+        "name": "read_file",
+        "args": {
+          "path": "/etc/passwd"
+        }
+      },
+      "ok": false,
+      "output": "PermissionError: path escapes workspace: '/etc/passwd'"
+    },
+    {
+      "call": {
+        "id": "p3",
+        "name": "write_file",
+        "args": {
+          "path": "../exec-41e1c3976bb14327b24656d2cebfc568/output/pwned.md",
+          "content": "x"
+        }
+      },
+      "ok": false,
+      "output": "PermissionError: path escapes workspace: '../exec-41e1c3976bb14327b24656d2cebfc568/output/pwned.md'"
+    },
+    {
+      "call": {
+        "id": "p4",
+        "name": "list_files",
+        "args": {
+          "path": "../.."
+        }
+      },
+      "ok": false,
+      "output": "PermissionError: path escapes workspace: '../..'"
+    }
+  ],
+  "crash": {
+    "execution_id": "exec-776b015a7c5a4e21ad134af7f4eadabf",
+    "killed_pod": "agent-worker-5dbc4d59f-hjwfr",
+    "survivor": "agent-worker-5dbc4d59f-6qlwj",
+    "activity_starts": [
+      [
+        "vfs.workspace-disk.mkdir",
+        "agent-worker-5dbc4d59f-hjwfr"
+      ],
+      [
+        "vfs.workspace-disk.mkdir",
+        "agent-worker-5dbc4d59f-hjwfr"
+      ],
+      [
+        "vfs.workspace-disk.mkdir",
+        "agent-worker-5dbc4d59f-hjwfr"
+      ],
+      [
+        "vfs.workspace-disk.mkdir",
+        "agent-worker-5dbc4d59f-hjwfr"
+      ],
+      [
+        "vfs.workspace-disk.write",
+        "agent-worker-5dbc4d59f-hjwfr"
+      ],
+      [
+        "llm_call",
+        "agent-worker-5dbc4d59f-hjwfr"
+      ],
+      [
+        "vfs.workspace-disk.write",
+        "agent-worker-5dbc4d59f-hjwfr"
+      ],
+      [
+        "vfs.workspace-disk.list",
+        "agent-worker-5dbc4d59f-hjwfr"
+      ],
+      [
+        "vfs.workspace-disk.write",
+        "agent-worker-5dbc4d59f-hjwfr"
+      ],
+      [
+        "llm_call",
+        "agent-worker-5dbc4d59f-hjwfr"
+      ],
+      [
+        "vfs.workspace-disk.write",
+        "agent-worker-5dbc4d59f-hjwfr"
+      ],
+      [
+        "vfs.workspace-disk.read",
+        "agent-worker-5dbc4d59f-hjwfr"
+      ],
+      [
+        "vfs.workspace-disk.write",
+        "agent-worker-5dbc4d59f-hjwfr"
+      ],
+      [
+        "llm_call",
+        "agent-worker-5dbc4d59f-6qlwj"
+      ],
+      [
+        "vfs.workspace-disk.write",
+        "agent-worker-5dbc4d59f-6qlwj"
+      ],
+      [
+        "vfs.workspace-disk.list",
+        "agent-worker-5dbc4d59f-6qlwj"
+      ],
+      [
+        "vfs.workspace-disk.write",
+        "agent-worker-5dbc4d59f-6qlwj"
+      ],
+      [
+        "llm_call",
+        "agent-worker-5dbc4d59f-6qlwj"
+      ],
+      [
+        "vfs.workspace-disk.write",
+        "agent-worker-5dbc4d59f-6qlwj"
+      ]
+    ],
+    "steps": [
+      {
+        "step": 0,
+        "llm_worker": "agent-worker-5dbc4d59f-hjwfr"
+      },
+      {
+        "step": 1,
+        "llm_worker": "agent-worker-5dbc4d59f-hjwfr"
+      },
+      {
+        "step": 2,
+        "llm_worker": "agent-worker-5dbc4d59f-6qlwj"
+      }
+    ],
+    "final": "DONE exec-776b015a7c5a4e21ad134af7f4eadabf digest=72fa373f86fb",
+    "session": "closed",
+    "workspace_files_seen_by_survivor": [
+      "./input/task.md",
+      "./output/plan.md",
+      "./output/result.md",
+      "./session.json",
+      "./temp/step-000.json",
+      "./temp/step-001.json",
+      "./temp/step-002.json"
+    ],
+    "seconds_to_complete_after_kill": 5.2
+  },
+  "pods_after": [
+    "agent-worker-5dbc4d59f-6qlwj",
+    "agent-worker-5dbc4d59f-bgtbk"
+  ]
+}

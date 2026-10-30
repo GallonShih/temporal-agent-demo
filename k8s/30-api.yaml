@@ -1,0 +1,33 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-api
+  namespace: agent-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: agent-api}
+  template:
+    metadata:
+      labels: {app: agent-api}
+    spec:
+      containers:
+        - name: agent-api
+          image: agent-worker:dev
+          imagePullPolicy: Never
+          command: ["uvicorn", "temporal_agent_demo.api:app", "--host", "0.0.0.0", "--port", "8000"]
+          env:
+            - {name: TEMPORAL_ADDRESS, value: "__TEMPORAL_ADDRESS__"}
+            - {name: TEMPORAL_NAMESPACE, value: "default"}
+          ports: [{containerPort: 8000}]
+          readinessProbe:
+            httpGet: {path: /healthz, port: 8000}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-api
+  namespace: agent-demo
+spec:
+  selector: {app: agent-api}
+  ports: [{port: 8000, targetPort: 8000}]

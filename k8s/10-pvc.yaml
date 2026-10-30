@@ -1,0 +1,14 @@
+# Single-node kind: the default `standard` (rancher local-path) class only supports RWO.
+# RWO = mountable read-write by pods on ONE node, so both replicas can share it here because
+# kind has one node. On a real multi-node cluster use ReadWriteMany (NFS / EFS / CephFS / Filestore).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: agent-workspaces
+  namespace: agent-demo
+spec:
+  accessModes: ["ReadWriteOnce"]   # prod: ReadWriteMany
+  storageClassName: standard        # prod: your-rwx-storage-class
+  resources:
+    requests:
+      storage: 2Gi

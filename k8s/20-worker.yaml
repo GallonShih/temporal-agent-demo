@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-worker
+  namespace: agent-demo
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: agent-worker}
+  template:
+    metadata:
+      labels: {app: agent-worker}
+    spec:
+      terminationGracePeriodSeconds: 10
+      containers:
+        - name: agent-worker
+          image: agent-worker:dev
+          imagePullPolicy: Never
+          env:
+            - {name: TEMPORAL_ADDRESS, value: "__TEMPORAL_ADDRESS__"}
+            - {name: TEMPORAL_NAMESPACE, value: "default"}
+            - {name: OPENAI_AGENTS_DISABLE_TRACING, value: "1"}
+            # OpenAI-compatible provider. Real xAI: OPENAI_BASE_URL=https://api.x.ai/v1, OPENAI_MODEL=<grok model>
+            - {name: LLM_BACKEND, value: "openai"}
+            # host-side llm_gateway (scripts/start-gateway.sh) via the kind docker bridge gateway.
+            # In-cluster mock instead: http://mock-llm.agent-demo.svc:8000/v1 + grok-mock
+            - {name: OPENAI_BASE_URL, value: "__OPENAI_BASE_URL__"}
+            - name: OPENAI_API_KEY
+              valueFrom: {secretKeyRef: {name: llm-api-key, key: api-key}}
+            - name: POD_NAME
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+          volumeMounts:
+            - {name: shared, mountPath: /data/workspaces, subPath: workspaces}
+            - {name: shared, mountPath: /data/payloads, subPath: payloads}   # harness large-payload offload, shared too
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {memory: 768Mi}
+      volumes:
+        - name: shared
+          persistentVolumeClaim: {claimName: agent-workspaces}
