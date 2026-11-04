@@ -2,7 +2,8 @@
 
     python -m temporal_agent_demo.worker
 
-Registers the WorkspaceAgent workflow. Its activities come from the client plugins (config.py):
+Registers the WorkspaceAgent and ClaudeTaskWorkflow workflows plus the run_claude_agent activity
+(activities.py, Claude Agent SDK). Its activities come from the client plugins (config.py):
 ``invoke_model_activity`` (OpenAIAgentsPlugin) and the harness + WorkspaceDisk ``vfs.*`` activities
 (AgentHarnessPlugin).
 """
@@ -20,6 +21,8 @@ from temporalio.worker import Worker
 
 from .config import connect
 from .shared import TASK_QUEUE
+from .activities import run_claude_agent
+from .claude_workflow import ClaudeTaskWorkflow
 from .workflows import WorkspaceAgent
 
 
@@ -31,7 +34,8 @@ def build_worker(client: Client, identity: str | None = None, **kw) -> Worker:
     return Worker(
         client,
         task_queue=TASK_QUEUE,
-        workflows=[WorkspaceAgent],
+        workflows=[WorkspaceAgent, ClaudeTaskWorkflow],
+        activities=[run_claude_agent],
         identity=identity or f"{worker_name()}@agent-worker",
         **kw,
     )

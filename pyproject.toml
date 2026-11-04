@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "temporal-agent-harness session agent on 2 Temporal workers: shared PVC, per-execution workspace isolation, Grok via a host LLM gateway"
 requires-python = ">=3.13"
 dependencies = [
+    "claude-agent-sdk>=0.2.178",
     "fastapi>=0.162.0",
     "httpx>=0.28.1",
     "temporal-agent-harness[code-mode,openai-agents]==0.8.0",

@@ -25,6 +25,11 @@ spec:
             - {name: OPENAI_BASE_URL, value: "__OPENAI_BASE_URL__"}
             - name: OPENAI_API_KEY
               valueFrom: {secretKeyRef: {name: llm-api-key, key: api-key}}
+            # Claude Agent SDK activity (run_claude_agent): Claude Code -> the same gateway's
+            # Anthropic-compatible /v1/messages. Same local gateway key; never in activity input.
+            - {name: ANTHROPIC_BASE_URL, value: "__ANTHROPIC_BASE_URL__"}
+            - name: ANTHROPIC_AUTH_TOKEN
+              valueFrom: {secretKeyRef: {name: llm-api-key, key: api-key}}
             - name: POD_NAME
               valueFrom: {fieldRef: {fieldPath: metadata.name}}
           volumeMounts:
@@ -32,7 +37,7 @@ spec:
             - {name: shared, mountPath: /data/payloads, subPath: payloads}   # harness large-payload offload, shared too
           resources:
             requests: {cpu: 50m, memory: 128Mi}
-            limits: {memory: 768Mi}
+            limits: {memory: 1536Mi}   # Claude Code CLI subprocess per running Claude activity
       volumes:
         - name: shared
           persistentVolumeClaim: {claimName: agent-workspaces}

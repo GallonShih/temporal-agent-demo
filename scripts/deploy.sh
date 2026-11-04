@@ -14,11 +14,12 @@ for img in agent-worker:dev; do
 done
 GW_IP=$(docker network inspect kind -f '{{range .IPAM.Config}}{{if .Gateway}}{{.Gateway}} {{end}}{{end}}' | tr ' ' '\n' | grep -E '^[0-9.]+$' | head -1)
 OPENAI_BASE_URL="${OPENAI_BASE_URL:-http://${GW_IP}:${GATEWAY_PORT:-8787}/v1}"
+ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-http://${GW_IP}:${GATEWAY_PORT:-8787}}"
 OPENAI_MODEL="${OPENAI_MODEL:-grok-4.6}"
 kubectl apply -f k8s/00-namespace.yaml -f k8s/10-pvc.yaml
 kubectl get secret -n agent-demo llm-api-key >/dev/null 2>&1 || kubectl apply -f k8s/15-llm-secret.yaml
 for f in k8s/20-worker.yaml k8s/30-api.yaml; do
-  sed -e "s|__TEMPORAL_ADDRESS__|${TEMPORAL_ADDRESS}|" -e "s|__OPENAI_BASE_URL__|${OPENAI_BASE_URL}|" \
+  sed -e "s|__TEMPORAL_ADDRESS__|${TEMPORAL_ADDRESS}|" -e "s|__OPENAI_BASE_URL__|${OPENAI_BASE_URL}|" -e "s|__ANTHROPIC_BASE_URL__|${ANTHROPIC_BASE_URL}|" \
       -e "s|__OPENAI_MODEL__|${OPENAI_MODEL}|" "$f" | kubectl apply -f -
 done
 kubectl rollout restart -n agent-demo deploy/agent-worker deploy/agent-api >/dev/null 2>&1 || true

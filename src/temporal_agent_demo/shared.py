@@ -90,3 +90,67 @@ class TaskResult(BaseModel):
     model: str
     tool_steps: list[ToolStep] = []
     model_calls: int = 0
+
+
+# ---- Claude Agent SDK activity (activities.py / claude_workflow.py) ------------------------------
+CLAUDE_WORKFLOW = "ClaudeTaskWorkflow"
+SKILL_NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
+DEFAULT_CLAUDE_BUILTINS = ["Read", "Write", "Edit", "Glob", "Grep"]
+ALLOWED_CLAUDE_BUILTINS = {"Read", "Write", "Edit", "Glob", "Grep", "TodoWrite"}  # never Bash/WebFetch/WebSearch
+
+
+class SystemPromptPreset(BaseModel):
+    """Claude Code's own system prompt plus our text appended."""
+
+    preset: str = "claude_code"
+    append: str = ""
+
+
+class ClaudeAgentInput(BaseModel):
+    """Input of the run_claude_agent activity. Recorded in workflow history: never put secrets here."""
+
+    execution_id: str
+    prompt: str = Field(min_length=1, max_length=20_000)
+    system_prompt: str | SystemPromptPreset | None = None
+    skills: dict[str, str] = {}  # skill name -> SKILL.md text, written to <ws>/.claude/skills/<name>/SKILL.md
+    enabled_skills: list[str] | None = None  # None = all provided skills
+    tools: list[str] = []  # names from the worker-side registry (claude_tools.REGISTRY)
+    builtin_tools: list[str] = Field(default_factory=lambda: list(DEFAULT_CLAUDE_BUILTINS))
+    model: str = DEFAULT_MODEL
+    max_turns: int = Field(default=10, ge=1, le=50)
+
+    @field_validator("execution_id")
+    @classmethod
+    def _shape(cls, v: str) -> str:
+        return _check_id(v)
+
+    @field_validator("skills")
+    @classmethod
+    def _skills(cls, v: dict[str, str]) -> dict[str, str]:
+        for name, text in v.items():
+            if not SKILL_NAME_RE.fullmatch(name):
+                raise ValueError(f"invalid skill name {name!r}")
+            if len(text) > 50_000:
+                raise ValueError(f"skill {name!r} too large")
+        return v
+
+    @field_validator("builtin_tools")
+    @classmethod
+    def _builtins(cls, v: list[str]) -> list[str]:
+        bad = set(v) - ALLOWED_CLAUDE_BUILTINS
+        if bad:
+            raise ValueError(f"builtin tools not allowed: {sorted(bad)}")
+        return v
+
+
+class ClaudeAgentResult(BaseModel):
+    execution_id: str
+    is_error: bool
+    subtype: str
+    result: str
+    num_turns: int = 0
+    session_id: str | None = None
+    usage: dict = {}
+    tool_uses: list[str] = []  # tool names in call order
+    denied: list[str] = []  # tool calls rejected by the workspace hook
+    files: list[str] = []  # workspace files after the run (relative, excluding .claude/)

@@ -27,7 +27,9 @@ import uuid
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
+
+from llm_gateway import anthropic_compat as ac
 
 from mock_llm_server.app import Settings as MockSettings
 from mock_llm_server.app import create_app as create_mock_app
@@ -83,7 +85,9 @@ def create_app() -> FastAPI:
 
     def authed(request: Request) -> bool:
         h = request.headers.get("authorization", "")
-        return h.lower().startswith("bearer ") and h[7:].strip() in keys
+        if h.lower().startswith("bearer ") and h[7:].strip() in keys:
+            return True
+        return request.headers.get("x-api-key", "").strip() in keys  # Anthropic-style clients
 
     @app.get("/healthz")
     async def healthz():
@@ -156,6 +160,86 @@ def create_app() -> FastAPI:
                 rec["upstream_error"] = str(payload)[:300]
             headers = {k: v for k, v in r.headers.items() if k.lower() == "retry-after"}
             return JSONResponse(payload, status_code=status, headers=headers)
+        finally:
+            rec.update(status=status, ms=round((time.monotonic() - t0) * 1000))
+            log.info(json.dumps(rec))
+
+    def aerr(status: int, msg: str, typ: str | None = None, headers: dict | None = None) -> JSONResponse:
+        return JSONResponse(ac.anthropic_error(status, msg, typ or ac.error_type_for(status)),
+                            status_code=status, headers=headers)
+
+    @app.post("/v1/messages/count_tokens")
+    async def count_tokens(request: Request):
+        if not authed(request):
+            return aerr(401, "missing or invalid gateway API key")
+        try:
+            body = await request.json()
+        except ValueError:
+            return aerr(400, "invalid JSON body")
+        return {"input_tokens": ac.count_tokens(body)}
+
+    @app.post("/v1/messages")
+    async def messages(request: Request):
+        """Anthropic Messages API, translated to the same upstream/mock routes as chat completions."""
+        t0, rid = time.monotonic(), uuid.uuid4().hex[:12]
+        rec: dict = {"event": "messages", "rid": rid, "client": request.headers.get("x-client-id")}
+        status = 500
+        try:
+            if not authed(request):
+                status = 401
+                return aerr(401, "missing or invalid gateway API key")
+            try:
+                body = await request.json()
+            except ValueError:
+                status = 400
+                return aerr(400, "invalid JSON body")
+            if not isinstance(body.get("messages"), list):
+                status = 400
+                return aerr(400, "messages: field required")
+            model = body.get("model") or default_model
+            body["model"] = model
+            oreq = ac.to_openai(body)
+            stream = bool(body.get("stream"))
+            rec.update(model=model, stream=stream, n_messages=len(oreq["messages"]), n_tools=len(oreq.get("tools") or []))
+            app.state.stats["requests"] += 1
+            if upstream is None or model == MOCK_MODEL:
+                rec["route"] = "mock"
+                app.state.stats["mock"] += 1
+                if f := request.headers.get("x-mock-fault"):
+                    status = int(f)
+                    return aerr(status, f"mock fault {status}", headers={"retry-after": "1"} if status == 429 else None)
+                status, payload, rheaders = 200, ac.mock_openai_reply(oreq), {}
+            else:
+                rec["route"] = "xai-oauth"
+                app.state.stats["upstream"] += 1
+                try:
+                    r = await upstream.request("POST", "/chat/completions", oreq)
+                except httpx.TransportError as e:
+                    status = 502
+                    return aerr(502, f"upstream transport error: {type(e).__name__}", "api_error")
+                except Exception as e:  # e.g. Hermes AuthError on refresh (no secrets in message)
+                    status = 503
+                    rec["error"] = type(e).__name__
+                    return aerr(503, f"upstream credential error: {type(e).__name__}", "api_error")
+                status = r.status_code
+                rheaders = {k: v for k, v in r.headers.items() if k.lower() == "retry-after"}
+                try:
+                    payload = r.json()
+                except ValueError:
+                    status = 502 if status < 400 else status
+                    return aerr(status, f"non-JSON upstream response ({r.status_code})")
+                if status != 200:
+                    rec["upstream_error"] = str(payload)[:300]
+                    m = payload.get("error") if isinstance(payload, dict) else None
+                    m = (m.get("message") if isinstance(m, dict) else m) or str(payload)[:300]
+                    return aerr(status, f"upstream: {m}", headers=rheaders)
+            out = ac.from_openai(payload, model)
+            rec.update(stop=out["stop_reason"], tool_uses=[b["name"] for b in out["content"] if b["type"] == "tool_use"],
+                       usage=out["usage"])
+            if stream:
+                return StreamingResponse(ac.sse_events(out), media_type="text/event-stream",
+                                         headers={"cache-control": "no-cache"})
+            return JSONResponse(out)
         finally:
             rec.update(status=status, ms=round((time.monotonic() - t0) * 1000))
             log.info(json.dumps(rec))

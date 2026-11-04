@@ -24,11 +24,15 @@ src/temporal_agent_demo/
                    (named tools.py, not activities.py: they are @agent.tool_defn tools; their file ops run as
                    the harness's vfs.workspace-disk.* activities)
   workspace_fs.py  WorkspaceDisk: per-workspace root, path confinement, atomic idempotent writes
+  activities.py    run_claude_agent: Claude Agent SDK (Claude Code) run confined to the workspace
+  claude_tools.py  worker-side custom tool registry for the Claude activity (in-process SDK MCP server)
+  claude_workflow.py  ClaudeTaskWorkflow: one run_claude_agent activity per execution
+  claude_starter.py   CLI: start a ClaudeTaskWorkflow with prompt / skills / tools
   worker.py        worker process (task queue `agent`)
   starter.py       CLI: start one execution and print its result
   api.py           FastAPI: POST /executions, GET /executions/{id}, POST /executions/{id}/close, /healthz
   config.py        Temporal client, AgentHarnessPlugin + OpenAIAgentsPlugin (tracing disabled)
-llm_gateway/       host-side OpenAI-compatible gateway: real Grok (Hermes xAI OAuth) or the mock
+llm_gateway/       host-side gateway (OpenAI chat completions + Anthropic /v1/messages): real Grok (Hermes xAI OAuth) or the mock
 mock_llm_server/   scripted OpenAI-compatible mock (used in-process by the gateway and by tests)
 tests/             pytest (local Temporal dev server via temporalio.testing; no k8s)
 k8s/               namespace, PVC, llm-api-key Secret, worker Deployment (x2), API
@@ -85,6 +89,38 @@ uv run python scripts/e2e.py --skip-mock --real 3  # 3 short real tasks -> e2e-o
 
 The gateway must run in Hermes's Python runtime (`hermes --print-runtime-command` plus `hermes_bootstrap`), which
 `start-gateway.sh` handles. Mock latency / fault injection: `MOCK_LATENCY_S`, `MOCK_FAULT_*` on the gateway.
+
+## Claude Agent SDK activity (PoC)
+
+`ClaudeTaskWorkflow` (`claude_workflow.py`) runs one activity, `run_claude_agent` (`activities.py`),
+which drives Claude Code through the Claude Agent SDK **inside a single activity**. Claude Code talks
+to the same host gateway through its Anthropic-compatible endpoint (`POST /v1/messages`, plus
+`/v1/messages/count_tokens`, translated to chat completions in `llm_gateway/anthropic_compat.py`),
+so it runs on grok-4.6 via SuperGrok (or `grok-mock`). No Anthropic key and no Node are needed: the SDK ships a native
+Claude Code binary.
+
+Input (`ClaudeAgentInput`, recorded in history, no secrets): `execution_id`, `prompt`,
+`system_prompt` (string or `{preset, append}`), `skills` (name -> SKILL.md text, written atomically
+to `<workspace>/.claude/skills/<name>/SKILL.md`), `enabled_skills`, `tools` (names from the
+worker-side registry in `claude_tools.py`: `word_count`, `current_utc_time`), `builtin_tools`
+(default Read/Write/Edit/Glob/Grep; Bash/Web* rejected), `model`, `max_turns`.
+
+Confinement: cwd `/data/workspaces/<execution id>`, `setting_sources=["project"]`,
+`strict_mcp_config`, `permission_mode="dontAsk"`, a PreToolUse hook denying any path outside the
+workspace (symlinks resolved), throwaway HOME/CLAUDE_CONFIG_DIR. Workers get
+`ANTHROPIC_BASE_URL=http://<kind gateway>:8787` and `ANTHROPIC_AUTH_TOKEN` from the `llm-api-key`
+Secret (pod env only). Temporal owns retries (`CLAUDE_CODE_MAX_RETRIES=0`, 2 attempts, 60 s heartbeat).
+
+```bash
+kubectl -n agent-demo exec -i deploy/agent-worker -- sh -c 'cat > /tmp/SKILL.md' < my-skill/SKILL.md
+kubectl -n agent-demo exec deploy/agent-worker -- python -m temporal_agent_demo.claude_starter \
+  "Write a poem to poem.txt, count its words, write output/report.md" \
+  --model grok-4.6 --tool word_count --skill report-style=/tmp/SKILL.md --append-system "Be brief."
+```
+
+Limits: a retry reruns the whole agent; the gateway replays streaming from a non-streamed upstream
+call (no token-by-token output); `count_tokens` is a chars/4 estimate; images/thinking/cache_control
+are dropped; the grok-mock path just calls the first offered tool with placeholder args.
 
 ## Caveats
 * kind is single-node: PVC is RWO (local-path). Multi-node needs RWX (NFS/EFS/CephFS).
