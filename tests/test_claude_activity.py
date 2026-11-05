@@ -74,7 +74,7 @@ def test_build_options():
 
 
 async def test_tool_registry():
-    assert set(REGISTRY) == {"word_count", "current_utc_time"}
+    assert set(REGISTRY) == {"word_count", "current_utc_time", "run_pytest"}
     assert (await word_count.handler({"text": "a b c"}))["content"][0]["text"].startswith("words=3")
     with pytest.raises(ValueError):
         build_server(["nope"])

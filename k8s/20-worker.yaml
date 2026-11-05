@@ -20,6 +20,7 @@ spec:
             - {name: TEMPORAL_ADDRESS, value: "__TEMPORAL_ADDRESS__"}
             - {name: TEMPORAL_NAMESPACE, value: "default"}
             - {name: OPENAI_AGENTS_DISABLE_TRACING, value: "1"}
+            - {name: POD_NAME, valueFrom: {fieldRef: {fieldPath: metadata.name}}}
             # OpenAI-compatible chat-completions endpoint: the host-side llm_gateway
             # (scripts/start-gateway.sh) via the kind docker bridge. The model name comes per session.
             - {name: OPENAI_BASE_URL, value: "__OPENAI_BASE_URL__"}
@@ -35,6 +36,7 @@ spec:
           volumeMounts:
             - {name: shared, mountPath: /data/workspaces, subPath: workspaces}
             - {name: shared, mountPath: /data/payloads, subPath: payloads}   # harness large-payload offload, shared too
+            - {name: shared, mountPath: /data/sessions, subPath: sessions}   # Claude Code transcripts (resume on any pod)
           resources:
             requests: {cpu: 50m, memory: 128Mi}
             limits: {memory: 1536Mi}   # Claude Code CLI subprocess per running Claude activity

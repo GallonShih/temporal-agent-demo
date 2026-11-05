@@ -21,7 +21,8 @@ from temporalio.worker import Worker
 
 from .config import connect
 from .shared import TASK_QUEUE
-from .activities import run_claude_agent
+from .activities import run_claude_agent, run_workspace_tests, write_workspace_files
+from .dev_workflow import DevTaskWorkflow
 from .claude_workflow import ClaudeTaskWorkflow
 from .workflows import WorkspaceAgent
 
@@ -34,8 +35,8 @@ def build_worker(client: Client, identity: str | None = None, **kw) -> Worker:
     return Worker(
         client,
         task_queue=TASK_QUEUE,
-        workflows=[WorkspaceAgent, ClaudeTaskWorkflow],
-        activities=[run_claude_agent],
+        workflows=[WorkspaceAgent, ClaudeTaskWorkflow, DevTaskWorkflow],
+        activities=[run_claude_agent, run_workspace_tests, write_workspace_files],
         identity=identity or f"{worker_name()}@agent-worker",
         **kw,
     )

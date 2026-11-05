@@ -122,6 +122,42 @@ Limits: a retry reruns the whole agent; the gateway replays streaming from a non
 call (no token-by-token output); `count_tokens` is a chars/4 estimate; images/thinking/cache_control
 are dropped; the grok-mock path just calls the first offered tool with placeholder args.
 
+## DevTaskWorkflow: multi-step coding PoC (plan → implement → test → fix → review)
+
+`dev_workflow.py` chains `run_claude_agent` steps over one workspace:
+
+| step | session | tools |
+|---|---|---|
+| plan | fresh | Read/Write/Edit/Glob/Grep → writes `PLAN.md`, `NOTES.md` |
+| implement | fresh (handoff: task + PLAN.md + plan summary) | file tools + `run_pytest` |
+| test-N | no LLM: `run_workspace_tests` activity (`python -m pytest -q`), ground truth | – |
+| fix-N (≤ `max_fix_iterations`, default 3) | **resumes the implement session** (`resume=<session_id>`) | file tools + `run_pytest` |
+| review | fresh, writes `REVIEW.md` | Read/Glob/Grep/Write |
+
+- **Long-term memory = workspace files** (`PLAN.md`, `NOTES.md` handoff log, `REVIEW.md`); fresh steps get a short handoff.
+- **Session persistence**: with `persist_session=True` the activity sets `HOME`/`CLAUDE_CONFIG_DIR` to
+  `$SESSIONS_ROOT/<execution id>` (`/data/sessions`, PVC subPath `sessions`, mode 0700, validated, never inside
+  the workspaces tree; the file guard denies agent access to it). Claude Code transcripts live there, keyed by
+  cwd, so any worker pod can resume. New `ClaudeAgentInput` fields (all optional, backward compatible):
+  `persist_session`, `resume_session_id` (UUID), `fork_session`, `step`. Results add `step`, `resumed_from`,
+  `worker` (pod), `attempt`.
+- **Hidden acceptance tests**: `acceptance_tests={path: content}` are written after implement, so the fix loop has
+  to satisfy a spec the implementer did not see.
+- **`run_pytest` tool** (registry, bound to the run's workspace): `python -m pytest` via exec (no shell), cwd = workspace,
+  path confined, minimal env (no secrets), runs as `nobody` when the worker is root (cannot read the worker's
+  `/proc/*/environ`), rlimits (CPU, 1 GiB AS, nproc), wall timeout (`RUN_PYTEST_TIMEOUT_S`, 90s), output truncated.
+  General Bash stays disabled.
+- **State**: query `progress` → `DevTaskResult` (per step: status, session_id, resumed_from, worker, attempt,
+  turns, usage, tool_uses, denied, summary); the same object is the workflow result.
+- **Retries**: an activity retry re-runs the step with the *same input*; for a fix step it resumes from the last
+  completed session id again (the transcript may already contain the partial turns of the failed attempt; Claude
+  Code continues from it). Workspace edits of a failed attempt are not rolled back.
+
+```bash
+python -m temporal_agent_demo.dev_starter "Create roman.py with to_roman/from_roman + pytest tests" \
+    --acceptance tests/test_acceptance.py=./hidden_test.py --model grok-4.6 --max-fix 3
+```
+
 ## Caveats
 * kind is single-node: PVC is RWO (local-path). Multi-node needs RWX (NFS/EFS/CephFS).
 * Workspace isolation is path-level inside the FS backend, not process/OS isolation.

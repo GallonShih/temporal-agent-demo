@@ -9,6 +9,7 @@ import pytest_asyncio
 _tmp = tempfile.mkdtemp(prefix="agent-demo-")
 os.environ["WORKSPACES_ROOT"] = os.path.join(_tmp, "workspaces")
 os.environ["PAYLOAD_DIR"] = os.path.join(_tmp, "payloads")
+os.environ["SESSIONS_ROOT"] = os.path.join(_tmp, "sessions")
 os.makedirs(os.environ["WORKSPACES_ROOT"], exist_ok=True)
 
 from temporalio.testing import WorkflowEnvironment  # noqa: E402

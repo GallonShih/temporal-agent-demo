@@ -118,11 +118,24 @@ class ClaudeAgentInput(BaseModel):
     builtin_tools: list[str] = Field(default_factory=lambda: list(DEFAULT_CLAUDE_BUILTINS))
     model: str = DEFAULT_MODEL
     max_turns: int = Field(default=10, ge=1, le=50)
+    # Session persistence / resume. persist_session keeps Claude Code's HOME + CLAUDE_CONFIG_DIR
+    # (transcripts) at <SESSIONS_ROOT>/<execution id> on the shared PVC, so any worker can resume.
+    persist_session: bool = False
+    resume_session_id: str | None = None  # continue this Claude Code session (needs persist_session)
+    fork_session: bool = False  # with resume: branch into a new session id instead of appending
+    step: str | None = None  # label for logs / results
 
     @field_validator("execution_id")
     @classmethod
     def _shape(cls, v: str) -> str:
         return _check_id(v)
+
+    @field_validator("resume_session_id")
+    @classmethod
+    def _sid(cls, v: str | None) -> str | None:
+        if v is not None and not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", v):
+            raise ValueError("resume_session_id must be a session UUID")
+        return v
 
     @field_validator("skills")
     @classmethod
@@ -154,3 +167,55 @@ class ClaudeAgentResult(BaseModel):
     tool_uses: list[str] = []  # tool names in call order
     denied: list[str] = []  # tool calls rejected by the workspace hook
     files: list[str] = []  # workspace files after the run (relative, excluding .claude/)
+    step: str | None = None
+    resumed_from: str | None = None
+    worker: str | None = None  # pod that ran the activity
+    attempt: int = 1
+
+
+# ---- DevTaskWorkflow (dev_workflow.py) --------------------------------------------------------
+DEV_WORKFLOW = "DevTaskWorkflow"
+
+
+class DevTaskInput(BaseModel):
+    execution_id: str
+    task: str = Field(min_length=1, max_length=20_000)
+    model: str = DEFAULT_MODEL
+    max_fix_iterations: int = Field(default=3, ge=0, le=10)
+    max_turns_per_step: int = Field(default=16, ge=1, le=50)
+    # Hidden acceptance tests (relative path -> content) written AFTER implement, before testing.
+    acceptance_tests: dict[str, str] = {}
+
+    @field_validator("execution_id")
+    @classmethod
+    def _shape(cls, v: str) -> str:
+        return _check_id(v)
+
+
+class PytestRun(BaseModel):
+    exit_code: int
+    passed: bool
+    output: str
+    worker: str | None = None
+
+
+class StepRecord(BaseModel):
+    name: str  # plan | implement | test-N | fix-N | review
+    status: str  # running | ok | failed | error
+    session_id: str | None = None
+    resumed_from: str | None = None
+    worker: str | None = None
+    attempt: int = 1
+    turns: int = 0
+    usage: dict = {}
+    tool_uses: list[str] = []
+    denied: list[str] = []
+    summary: str = ""
+
+
+class DevTaskResult(BaseModel):
+    execution_id: str
+    status: str  # passed | failed | running
+    fix_iterations: int = 0
+    steps: list[StepRecord] = []
+    files: list[str] = []
