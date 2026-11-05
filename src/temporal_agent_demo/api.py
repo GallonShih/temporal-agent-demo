@@ -19,7 +19,9 @@ from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.service import RPCError
 
 from .config import connect
-from .shared import AGENT_NAME, EXECUTION_ID_RE, TaskResult
+from typing import Literal
+
+from .shared import AGENT_NAME, EXECUTION_ID_RE, ORCHESTRATOR_NAME, TaskResult
 from .starter import start_execution
 
 
@@ -27,6 +29,8 @@ class ExecutionRequest(BaseModel):
     task: str
     max_steps: int = 12  # max model turns
     model: str | None = None  # default: OPENAI_MODEL env (grok-4.6)
+    agent: Literal["workspace", "orchestrator"] = "workspace"
+    helper_workspace_mode: Literal["inherit", "isolated"] = "isolated"  # orchestrator's `helper` subagent
 
 
 def create_app(client: Client | None = None) -> FastAPI:
@@ -43,7 +47,8 @@ def create_app(client: Client | None = None) -> FastAPI:
 
     @app.post("/executions", status_code=201)
     async def create_execution(req: ExecutionRequest) -> dict:
-        return await start_execution(app.state.client, req.task, req.model, req.max_steps)
+        return await start_execution(app.state.client, req.task, req.model, req.max_steps,
+                                     req.agent == "orchestrator", req.helper_workspace_mode)
 
     @app.get("/executions/{execution_id}")
     async def get_execution(execution_id: str) -> dict:
@@ -53,7 +58,7 @@ def create_app(client: Client | None = None) -> FastAPI:
             desc = await handle.describe()
         except RPCError:
             raise HTTPException(404, "not found")
-        if desc.workflow_type != AGENT_NAME:
+        if desc.workflow_type not in (AGENT_NAME, ORCHESTRATOR_NAME):
             raise HTTPException(404, "not an agent execution")
         res = await handle.query("result", result_type=TaskResult | None)
         return {"execution_id": execution_id, "workflow_type": desc.workflow_type,

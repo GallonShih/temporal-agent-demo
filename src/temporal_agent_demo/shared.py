@@ -5,10 +5,12 @@ Imported by the workflow (inside the sandbox, passed through), the worker, the A
 
 from __future__ import annotations
 
+import hashlib
 import re
 import uuid
+from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 TASK_QUEUE = "agent"
 AGENT_NAME = "WorkspaceAgent"  # workflow type
@@ -48,17 +50,84 @@ class ExecutionContext(BaseModel):
         return cls(execution_id=eid, session_id=eid, workspace_id=eid)
 
 
-class WorkspaceSession(BaseModel):
-    """Init data (second workflow argument). Chosen by the Execution Manager, never the model."""
+ORCHESTRATOR_NAME = "OrchestratorAgent"  # workflow type of the parent with subagent tools
+WorkspaceMode = Literal["inherit", "isolated"]
+ROLE_NAME_RE = re.compile(r"[a-z][a-z0-9_]{0,31}")
 
-    execution_id: str
+
+class AgentRole(BaseModel):
+    """How a WorkspaceAgent runs as a SUBAGENT. Built by developer code (subagent init_data), never by a model."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    instructions: str = Field(default="", max_length=4000)
+    read_only: bool = False  # enforced by WorkspaceDisk (all writes rejected) + no write_file tool
+    workspace_mode: WorkspaceMode = "isolated"
+
+    @field_validator("name")
+    @classmethod
+    def _name(cls, v: str) -> str:
+        if not ROLE_NAME_RE.fullmatch(v):
+            raise ValueError(f"invalid role name {v!r}")
+        return v
+
+
+class WorkspaceSession(BaseModel):
+    """Init data (second workflow argument). Chosen by the Execution Manager / parent code, never the model.
+
+    Top-level session: execution_id required (== workflow_id == workspace_id), role None.
+    Subagent: role set, execution_id None; the workspace is resolved from the Temporal parent link
+    (inherit) or derived from the child's own workflow id (isolated) - see resolve_workspace_id."""
+
+    model_config = ConfigDict(extra="forbid")  # no workspace_id / path can be smuggled in
+
+    execution_id: str | None = None
     model: str = DEFAULT_MODEL
     max_turns: int = Field(default=12, ge=1, le=50)
+    role: AgentRole | None = None
 
     @field_validator("execution_id")
     @classmethod
-    def _shape(cls, v: str) -> str:
-        return _check_id(v)
+    def _shape(cls, v: str | None) -> str | None:
+        return None if v is None else _check_id(v)
+
+    @model_validator(mode="after")
+    def _exactly_one(self) -> "WorkspaceSession":
+        if (self.role is None) == (self.execution_id is None):
+            raise ValueError("exactly one of execution_id (top-level) or role (subagent) must be set")
+        return self
+
+
+class OrchestratorSession(WorkspaceSession):
+    """Init data of OrchestratorAgent. `helper_workspace_mode` (from the start request) picks the
+    workspace mode of the `helper` subagent; reviewer (inherit) and researcher (isolated) are fixed."""
+
+    helper_workspace_mode: WorkspaceMode = "isolated"
+
+    @model_validator(mode="after")
+    def _top_level(self) -> "OrchestratorSession":
+        if self.role is not None:
+            raise ValueError("the orchestrator is a top-level session")
+        return self
+
+
+def isolated_workspace_id(workflow_id: str) -> str:
+    """Deterministic own workspace for an isolated subagent: exec-<sha256(child workflow id)[:32]>."""
+    return "exec-" + hashlib.sha256(workflow_id.encode()).hexdigest()[:32]
+
+
+def resolve_workspace_id(data: WorkspaceSession, workflow_id: str, parent_workflow_id: str | None) -> str:
+    """The ONLY place a session's workspace id is decided (raises ValueError on any mismatch)."""
+    if data.role is None:
+        if data.execution_id != workflow_id:
+            raise ValueError(f"workflow_id {workflow_id!r} != execution_id {data.execution_id!r}")
+        return _check_id(workflow_id)
+    if parent_workflow_id is None:
+        raise ValueError("a role (subagent) session must be started as a child workflow")
+    if data.role.workspace_mode == "inherit":
+        return _check_id(parent_workflow_id)  # parent's workspace == parent's workflow id
+    return isolated_workspace_id(workflow_id)
 
 
 class TaskMessage(BaseModel):
@@ -79,6 +148,10 @@ class ToolStep(BaseModel):
 
 class TaskResult(BaseModel):
     """Outcome of the session's task."""
+
+    role: str | None = None
+    workspace_mode: str | None = None  # None (top-level) | inherit | isolated
+    read_only: bool = False
 
     execution_id: str
     session_id: str

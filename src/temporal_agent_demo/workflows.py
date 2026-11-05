@@ -47,8 +47,9 @@ with workflow.unsafe.imports_passed_through():
     from temporal_agent_harness.harness.agent_protocol import AgentConfig, MidTurn, ToolApprovalPolicy
     from temporal_agent_harness.harness.agent_workflow import AgentWorkflowRunner
 
-    from .shared import AGENT_NAME, MAX_OUTPUT, MOUNT, TaskMessage, TaskResult, ToolStep, WorkspaceSession
-    from .tools import FILE_TOOLS
+    from .shared import (AGENT_NAME, MAX_OUTPUT, MOUNT, TaskMessage, TaskResult, ToolStep, WorkspaceSession,
+                         resolve_workspace_id)
+    from .tools import FILE_TOOLS, read_file, list_files
     from .workspace_fs import WorkspaceDisk, WorkspaceDiskConfig
 
 SYSTEM_PROMPT = f"""\
@@ -57,6 +58,16 @@ Only paths under `{MOUNT}` exist for you. Do the task by calling tools and put d
 `{MOUNT}/output/`. Use `write_file` / `read_file` / `list_files` for single-file operations, and \
 `run_code` for multi-step file work in one script. When finished, reply with a one-paragraph \
 summary and no tool calls."""
+
+ROLE_PROMPT = """You are the `{name}` subagent of another agent. {mode_text} Only paths under `{mount}` exist for you.
+{ro_text}When finished, reply with a concise summary (and no tool calls).
+
+Role instructions:
+{instructions}"""
+MODE_TEXT = {
+    "inherit": "`{mount}` is your PARENT's workspace (shared with it): you see the files it wrote.",
+    "isolated": "`{mount}` is your OWN private scratch workspace; the parent's files are not visible here.",
+}
 
 
 # ---------------------------------------------------------------- the agent
@@ -74,9 +85,22 @@ class WorkspaceAgent:
             approval_policy_default=ToolApprovalPolicy.dangerously_skip_all(),
         )
         self._data = data
-        # Bound by the workflow input (Execution Manager), NOT by the model.
-        self._ws = self.workspace.bind(WorkspaceDiskConfig(workspace_id=data.execution_id),
-                                       timeout=timedelta(seconds=30))
+        info = workflow.info()
+        # Decided by the init data (Execution Manager / parent code) + Temporal's parent link, NEVER the model.
+        self._id_error: str | None = None
+        try:
+            ws_id = resolve_workspace_id(data, info.workflow_id, info.parent.workflow_id if info.parent else None)
+        except ValueError as e:
+            self._id_error, ws_id = str(e), None
+        self._ws_id = ws_id
+        role = data.role
+        self._read_only = bool(role and role.read_only)
+        # Bookkeeping files (session.json, input/task.md, temp/steps.json) only in a workspace this
+        # session owns and may write - never into a parent's shared workspace.
+        self._own_ws = role is None or (role.workspace_mode == "isolated" and not self._read_only)
+        self._ws = self.workspace.bind(
+            WorkspaceDiskConfig(workspace_id=ws_id or "exec-" + "0" * 32, read_only=self._read_only),
+            timeout=timedelta(seconds=30))
         self._code_tool = agent.code_mode_tool([], name="run_code", mounts=[self._ws])
         self._result: TaskResult | None = None
         self._outcome = "open"
@@ -85,19 +109,34 @@ class WorkspaceAgent:
     # -- invariants + workspace layout --------------------------------------------------
     @agent.setup
     async def setup(self) -> None:
-        info = workflow.info()
-        if info.workflow_id != self._data.execution_id:
-            raise ApplicationError(
-                f"workflow_id {info.workflow_id!r} != execution_id {self._data.execution_id!r}",
-                type="IdMismatch", non_retryable=True)
-        fs = self._ws.backend
-        for d in (".", "input", "output", "temp"):
-            await fs.mkdir(PurePosixPath(d))
-        await self._write_session("open")
+        if self._id_error is not None:
+            raise ApplicationError(self._id_error, type="IdMismatch", non_retryable=True)
+        if self._own_ws:
+            fs = self._ws.backend
+            for d in (".", "input", "output", "temp"):
+                await fs.mkdir(PurePosixPath(d))
+            await self._write_session("open")
 
     @agent.teardown
     async def teardown(self) -> None:
-        await self._write_session("closed")
+        if self._own_ws and self._id_error is None:
+            await self._write_session("closed")
+
+    # -- overridable: prompt + tools ---------------------------------------------------------
+    def _instructions(self) -> str:
+        role = self._data.role
+        if role is None:
+            return f"{SYSTEM_PROMPT}\nsession_id={self._data.execution_id}"
+        return ROLE_PROMPT.format(
+            name=role.name, mount=MOUNT, instructions=role.instructions or "Do the task you are given.",
+            mode_text=MODE_TEXT[role.workspace_mode].format(mount=MOUNT),
+            ro_text="Your access is READ-ONLY: you cannot create or modify files; report findings in your reply.\n"
+            if self._read_only else f"Put deliverables under `{MOUNT}/output/`.\n")
+
+    def _tools(self, injections: dict) -> list:
+        file_tools = (read_file, list_files) if self._read_only else FILE_TOOLS
+        return [as_openai_agent_tool(self._runner, t, injections=injections) for t in file_tools] \
+            + [as_openai_agent_tool(self._runner, self._code_tool)]
 
     # -- the one message type ---------------------------------------------------------------
     @agent.accepts(mid_turn=MidTurn.REJECT)
@@ -107,15 +146,14 @@ class WorkspaceAgent:
             raise ApplicationError("this session already ran its task", type="SessionDone", non_retryable=True)
         self._task = message.task
         fs = self._ws.backend
-        await fs.write(PurePosixPath("input/task.md"), message.task.encode())
+        if self._own_ws:
+            await fs.write(PurePosixPath("input/task.md"), message.task.encode())
         injections = {"ws": fs}
         sdk_agent = SDKAgent(
-            name=AGENT_NAME,
-            instructions=f"{SYSTEM_PROMPT}\nsession_id={self._data.execution_id}",
+            name=self._data.role.name if self._data.role else AGENT_NAME,
+            instructions=self._instructions(),
             model=self._data.model,
-            tools=[as_openai_agent_tool(self._runner, t, injections=injections)
-                   for t in FILE_TOOLS]
-                  + [as_openai_agent_tool(self._runner, self._code_tool)],
+            tools=self._tools(injections),
         )
         items: list[Any] = []
         model_calls = 0
@@ -131,14 +169,18 @@ class WorkspaceAgent:
         except ActivityError as e:  # model activity exhausted its retries / non-retryable 4xx
             outcome, final = "failed", f"model call failed: {getattr(e.cause, 'message', e.cause)}"
         steps = _tool_steps(items)
-        await fs.write(PurePosixPath("temp/steps.json"),
-                       json.dumps([s.model_dump() for s in steps], indent=2).encode())
+        if self._own_ws:
+            await fs.write(PurePosixPath("temp/steps.json"),
+                           json.dumps([s.model_dump() for s in steps], indent=2).encode())
         info = workflow.info()
         self._outcome = outcome
+        role = self._data.role
         self._result = TaskResult(
-            execution_id=info.workflow_id, session_id=info.workflow_id, workspace_id=self._data.execution_id,
+            execution_id=info.workflow_id, session_id=info.workflow_id, workspace_id=self._ws_id,
             run_id=info.run_id, outcome=outcome, final=final, session_status="closed",
-            model=self._data.model, tool_steps=steps, model_calls=model_calls)
+            model=self._data.model, tool_steps=steps, model_calls=model_calls,
+            role=role.name if role else None, workspace_mode=role.workspace_mode if role else None,
+            read_only=self._read_only)
         # Explicitly end the session. A workflow cannot signal itself (Temporal answers
         # EXTERNAL_WORKFLOW_EXECUTION_NOT_FOUND), so call the handler the harness registers for its
         # `close` signal; the turn loop drains this turn, then teardown writes session.json "closed".
@@ -153,8 +195,8 @@ class WorkspaceAgent:
         info = workflow.info()
         doc = {
             "execution_id": info.workflow_id, "session_id": info.workflow_id,
-            "workspace_id": self._data.execution_id, "workflow_id": info.workflow_id, "run_id": info.run_id,
-            "agent": AGENT_NAME, "model": self._data.model, "status": status, "outcome": self._outcome,
+            "workspace_id": self._ws_id, "workflow_id": info.workflow_id, "run_id": info.run_id,
+            "agent": info.workflow_type, "role": self._data.role.name if self._data.role else None, "model": self._data.model, "status": status, "outcome": self._outcome,
             "at": workflow.now().isoformat(),
         }
         if self._result:

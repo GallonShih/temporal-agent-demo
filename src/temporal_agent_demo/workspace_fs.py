@@ -34,6 +34,7 @@ def workspaces_root() -> Path:
 
 class WorkspaceDiskConfig(BaseModel):
     workspace_id: str
+    read_only: bool = False  # every mutating op raises PermissionError
 
     @field_validator("workspace_id")
     @classmethod
@@ -54,6 +55,10 @@ class WorkspaceDisk(ActivityFileSystem[WorkspaceDiskConfig], name="workspace-dis
         self._root = (base / config.workspace_id).resolve()
         if self._root.parent != base:  # belt and braces on top of the regex
             raise ValueError("workspace root outside workspaces base")
+
+    def _check_writable(self, path: object) -> None:
+        if self.config.read_only:
+            raise PermissionError(errno.EROFS, "workspace is mounted read-only for this agent", str(path))
 
     # ---- confinement -------------------------------------------------------------------
     def _resolve(self, path: PurePosixPath | str) -> Path:
@@ -85,6 +90,7 @@ class WorkspaceDisk(ActivityFileSystem[WorkspaceDiskConfig], name="workspace-dis
 
     # ---- write side (idempotent) -------------------------------------------------------
     async def write(self, path: PurePosixPath, data: bytes) -> None:
+        self._check_writable(path)
         full = self._resolve(path)
         if full == self._root:
             raise IsADirectoryError(errno.EISDIR, "is the workspace root", str(path))
@@ -104,10 +110,12 @@ class WorkspaceDisk(ActivityFileSystem[WorkspaceDiskConfig], name="workspace-dis
             raise
 
     async def mkdir(self, path: PurePosixPath) -> None:
+        self._check_writable(path)
         # "." creates the workspace root itself. exist_ok => safe to retry.
         self._resolve(path).mkdir(parents=True, exist_ok=True)
 
     async def delete(self, path: PurePosixPath) -> None:
+        self._check_writable(path)
         full = self._resolve(path)
         if full == self._root:
             raise _deny(path)
@@ -118,6 +126,7 @@ class WorkspaceDisk(ActivityFileSystem[WorkspaceDiskConfig], name="workspace-dis
         # missing => already deleted (idempotent)
 
     async def rename(self, path: PurePosixPath, target: PurePosixPath) -> None:
+        self._check_writable(path)
         src, dst = self._resolve(path), self._resolve(target)
         if not src.exists() and dst.exists():
             return  # retry after a successful rename

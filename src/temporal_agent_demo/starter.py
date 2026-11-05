@@ -19,24 +19,29 @@ from temporal_agent_harness.harness.agent_client import AgentClient
 from temporal_agent_harness.harness.agent_protocol import AgentConfig
 
 from .config import connect
-from .shared import AGENT_NAME, DEFAULT_MODEL, TASK_QUEUE, ExecutionContext, TaskResult, WorkspaceSession
+from .shared import (AGENT_NAME, DEFAULT_MODEL, ORCHESTRATOR_NAME, TASK_QUEUE, ExecutionContext, OrchestratorSession,
+                     TaskResult, WorkspaceSession)
 
 
-async def start_execution(client: Client, task: str, model: str | None = None, max_turns: int = 12) -> dict:
+async def start_execution(client: Client, task: str, model: str | None = None, max_turns: int = 12,
+                          orchestrator: bool = False, helper_workspace_mode: str = "isolated") -> dict:
     """Start a session with execution_id == workflow_id == session_id == workspace_id and submit
     the task as its first message in the same call (update-with-start). Returns the ids."""
     ctx = ExecutionContext.new()  # fresh id every time; never reuse a session/workspace
-    session = WorkspaceSession(execution_id=ctx.execution_id, max_turns=max_turns,
-                               model=model or os.environ.get("OPENAI_MODEL", DEFAULT_MODEL))
+    kw = dict(execution_id=ctx.execution_id, max_turns=max_turns,
+              model=model or os.environ.get("OPENAI_MODEL", DEFAULT_MODEL))
+    session = (OrchestratorSession(**kw, helper_workspace_mode=helper_workspace_mode) if orchestrator
+               else WorkspaceSession(**kw))
+    workflow_name = ORCHESTRATOR_NAME if orchestrator else AGENT_NAME
     reply = await AgentClient(client, ctx.execution_id).start_and_submit_message(
         "run_task", {"task": task},
-        workflow_name=AGENT_NAME, task_queue=TASK_QUEUE,
+        workflow_name=workflow_name, task_queue=TASK_QUEUE,
         start_config=AgentConfig(), start_data=session,
         update_id=f"{ctx.execution_id}-task",  # idempotent re-delivery
     )
     desc = await client.get_workflow_handle(ctx.execution_id).describe()
     return {**ctx.model_dump(), "workflow_id": ctx.execution_id, "run_id": desc.run_id,
-            "model": session.model, "message_id": reply.message_id}
+            "model": session.model, "message_id": reply.message_id, "agent": workflow_name}
 
 
 async def wait_result(client: Client, execution_id: str) -> TaskResult:
@@ -51,9 +56,13 @@ async def main() -> None:
     ap.add_argument("--model", default=None)
     ap.add_argument("--max-turns", type=int, default=12)
     ap.add_argument("--no-wait", action="store_true")
+    ap.add_argument("--orchestrator", action="store_true", help="start OrchestratorAgent (with subagents)")
+    ap.add_argument("--helper-mode", choices=["inherit", "isolated"], default="isolated",
+                    help="workspace mode of the orchestrator's `helper` subagent")
     args = ap.parse_args()
     client = await connect()
-    started = await start_execution(client, args.task, args.model, args.max_turns)
+    started = await start_execution(client, args.task, args.model, args.max_turns,
+                                    args.orchestrator, args.helper_mode)
     print(json.dumps(started, indent=2))
     if not args.no_wait:
         res = await wait_result(client, started["execution_id"])

@@ -119,6 +119,37 @@ def _plan(task: str, sid: str, digest: str, tool_msgs: list[dict]) -> list[list[
     return plan
 
 
+def _out(tool_msgs: list[dict], cid: str) -> str:
+    return next((_text(m.get("content")) for m in tool_msgs if m.get("tool_call_id") == cid), "")
+
+
+def _subagent_plan(task: str, tool_msgs: list[dict]) -> list[list[dict] | str] | None:
+    """Scripted subagent flows (OrchestratorAgent + WorkspaceAgent children), keyed by task markers."""
+    if "[delegate]" in task:  # the orchestrator
+        def handle(cid: str) -> str:
+            m = re.search(r"[A-Za-z0-9_-]+", _out(tool_msgs, cid).strip().strip('"'))
+            return m.group(0) if m else "?"
+        return [
+            [_tool_call("o1", "write_file", {"path": "/workspace/output/draft.md", "content": "PARENT-DRAFT v1\n"})],
+            [_tool_call("o2", "start_reviewer", {}), _tool_call("o3", "start_researcher", {})],
+            [_tool_call("o4", "reviewer_run_task", {"subagent": handle("o2"), "message": {
+                "task": "[review] review /workspace/output/draft.md"}}),
+             _tool_call("o5", "researcher_run_task", {"subagent": handle("o3"), "message": {
+                 "task": "[research] write notes"}})],
+            "ORCH DONE " + json.dumps({"reviewer": _out(tool_msgs, "o4")[:1500],
+                                       "researcher": _out(tool_msgs, "o5")[:1500]}),
+        ]
+    if "[review]" in task or "[research]" in task:  # a child
+        return [
+            [_tool_call("c1", "read_file", {"path": "/workspace/output/draft.md"}),
+             _tool_call("c2", "write_file", {"path": "/workspace/output/child.md", "content": "CHILD-NOTE\n"}),
+             _tool_call("c3", "run_code", {"script": "from pathlib import Path\n"
+                                           "Path('/workspace/output/child_code.md').write_text('x')"})],
+            "CHILD " + json.dumps({c: _out(tool_msgs, c)[:300] for c in ("c1", "c2", "c3")}),
+        ]
+    return None
+
+
 def scripted_reply(messages: list[dict], tools_available: set[str]) -> dict:
     """Next assistant message for this conversation (deterministic)."""
     task = next((_text(m.get("content")) for m in messages if m.get("role") == "user"), "")
@@ -128,7 +159,10 @@ def scripted_reply(messages: list[dict], tools_available: set[str]) -> dict:
     digest = hashlib.sha256(task.encode()).hexdigest()[:12]
     if not tools_available:
         return {"role": "assistant", "content": f"DONE {sid} (no tools offered)"}
-    plan = _plan(task, sid, digest, tool_msgs)
+    plan = _subagent_plan(task, tool_msgs) or _plan(task, sid, digest, tool_msgs)
+    plan = [st if isinstance(st, str) else [c for c in st if c["function"]["name"] in tools_available]
+            for st in plan]
+    plan = [st for st in plan if st]
     # Position = first step whose calls are not all answered yet (robust to clients that split
     # one multi-call assistant message into several, as the Agents SDK may).
     answered = {m.get("tool_call_id") for m in tool_msgs}

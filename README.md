@@ -158,6 +158,38 @@ python -m temporal_agent_demo.dev_starter "Create roman.py with to_roman/from_ro
     --acceptance tests/test_acceptance.py=./hidden_test.py --model grok-4.6 --max-fix 3
 ```
 
+## Subagents (harness-native): inherit or isolate the parent's workspace
+
+`orchestrator.py` adds **OrchestratorAgent** (a WorkspaceAgent subclass) that drives plain **WorkspaceAgent**
+children through `temporal_agent_harness.harness.subagent_toolset` (child workflows, `ParentClosePolicy.TERMINATE`,
+messages via the auto-registered `run_subagent_turn` activity, deduplicated by update id). Children get no
+subagent tools, so there is no recursion.
+
+| key | workspace | access | chosen by |
+|---|---|---|---|
+| `reviewer` | **inherit**: the parent's `/data/workspaces/<parent id>` | read-only | developer (fixed) |
+| `researcher` | **isolated**: `exec-<sha256(child workflow id)[:32]>` | read-write | developer (fixed) |
+| `helper` | inherit or isolated | read-write | **start request**: `helper_workspace_mode` |
+
+- The child's init data (`WorkspaceSession(role=AgentRole(...))`) is built by parent *code*; the model only
+  sees `start_<key>()` (no arguments), `<key>_run_task(subagent, message)`, `stop_<key>(subagent)`.
+  `WorkspaceSession`/`AgentRole` forbid extra fields; there is no workspace-id or path field to inject.
+- `resolve_workspace_id` (shared.py) is the only place the workspace is decided: top-level =
+  `execution_id == workflow_id` (unchanged); inherit = the Temporal **parent link** (`workflow.info().parent`);
+  isolated = a hash of the child's own workflow id (deterministic, replay-safe). WorkspaceDisk confinement
+  and id validation are unchanged.
+- Read-only is enforced in `WorkspaceDisk` (`read_only=True`: write/mkdir/delete/rename raise PermissionError,
+  so Code Mode can't write either), plus `write_file` is not offered.
+- Inherit-mode children never write bookkeeping (`session.json`, `input/task.md`, `temp/steps.json`) into
+  the parent's workspace.
+- **Concurrency:** an inherit-mode *writer* (e.g. `helper_workspace_mode=inherit`) races the parent and its
+  siblings on the same files (atomic writes, last one wins, no locking). The read-only reviewer avoids that;
+  prefer isolated mode for writers.
+- Start: `python -m temporal_agent_demo.starter --orchestrator [--helper-mode inherit|isolated] "task"`, or
+  `POST /executions {"task": ..., "agent": "orchestrator", "helper_workspace_mode": "inherit"}`.
+- harness 0.8.0 quirk: the generated send tool is called positionally by the OpenAI Agents adapter; it is
+  re-wrapped in `orchestrator._positional_send`.
+
 ## Caveats
 * kind is single-node: PVC is RWO (local-path). Multi-node needs RWX (NFS/EFS/CephFS).
 * Workspace isolation is path-level inside the FS backend, not process/OS isolation.
